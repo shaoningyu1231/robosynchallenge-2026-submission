@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from policy.inference_timing import finish_inference, start_inference
+
 
 def _to_numpy(value) -> np.ndarray:
     if isinstance(value, torch.Tensor):
@@ -130,6 +132,10 @@ def encode_action(
     return action_tensor.unsqueeze(0)
 
 
+def _empty_timing() -> dict:
+    return {"rpc_calls": 0, "forwards": 0, "rpc_s": 0.0, "forward_s": 0.0}
+
+
 class SmolVLAWorkerClient:
     def __init__(self, usr_args: dict):
         policy_root = Path(__file__).resolve().parent
@@ -144,6 +150,15 @@ class SmolVLAWorkerClient:
         self.python_bin = usr_args.get("smolvla_python") or os.environ.get("SMOLVLA_PYTHON") or sys.executable
         self.device = usr_args.get("pytorch_device", "cuda")
         self.smolvla_steps = int(usr_args.get("smolvla_steps", 10))
+        replan_steps = usr_args.get("smolvla_replan_steps")
+        self.replan_steps = None if replan_steps in (None, "", "None", "null") else int(replan_steps)
+        if self.replan_steps is not None and self.replan_steps < 1:
+            # The upper bound (chunk_size) is checked by the worker, which knows the model.
+            raise ValueError(f"smolvla_replan_steps must be >= 1, got {self.replan_steps}")
+        self.episode_timing = _empty_timing()
+        self.check_success_each_step = bool(
+            _resolve_optional_bool(usr_args.get("smolvla_check_success_each_step", False))
+        )
         self.gripper_indices = tuple(int(idx) for idx in usr_args.get("smolvla_gripper_indices", [6, 13]))
         source_range = usr_args.get("smolvla_gripper_source_range", [0.0, 1.0])
         self.gripper_source_range = (float(source_range[0]), float(source_range[1]))
@@ -262,17 +277,35 @@ class SmolVLAWorkerClient:
                 {
                     "cmd": "infer",
                     "obs_path": obs_path,
-                    "n_action_steps": self.smolvla_steps,
+                    "n_action_steps": self.replan_steps if self.replan_steps is not None else self.smolvla_steps,
+                    "replan": self.replan_steps is not None,
                 }
             )
         finally:
             if os.path.exists(obs_path):
                 os.remove(obs_path)
 
+        self.episode_timing["forwards"] += int(response.get("forwards", 0))
+        self.episode_timing["forward_s"] += float(response.get("forward_s", 0.0))
         return [np.asarray(action, dtype=np.float32) for action in response["actions"]]
+
+    def record_call(self, seconds: float) -> None:
+        self.episode_timing["rpc_calls"] += 1
+        self.episode_timing["rpc_s"] += seconds
+
+    def log_episode_timing(self) -> None:
+        """One line per episode for tools/parse_eval_log.py: worker calls vs actual model forwards."""
+        timing = self.episode_timing
+        print(
+            f"[SmolVLA timing] rpc_calls={timing['rpc_calls']} forwards={timing['forwards']} "
+            f"rpc_s={timing['rpc_s']:.6f} forward_s={timing['forward_s']:.6f}",
+            flush=True,
+        )
+        self.episode_timing = _empty_timing()
 
     def reset(self) -> None:
         self._debug_chunks_printed = 0
+        self.episode_timing = _empty_timing()
         self._rpc({"cmd": "reset"})
 
     def maybe_print_action_debug(self, actions: list[np.ndarray]) -> None:
@@ -338,8 +371,14 @@ def get_model(usr_args):
 
 def eval(env, model, obs):
     instruction = getattr(env, "_current_instruction", None) or "click the bell"
+    # One sample per worker call: observation encoding, IPC and the returned
+    # actions (a model forward runs only when the worker needs a new chunk).
+    inference_times_s = []
+    started_at = start_inference()
     encoded_obs = encode_obs(obs, image_keys=model.image_keys)
     actions = model.infer(encoded_obs, task=instruction)
+    finish_inference(started_at, inference_times_s)
+    model.record_call(inference_times_s[-1])
     model.maybe_print_action_debug(actions)
 
     final_obs = obs
@@ -357,8 +396,14 @@ def eval(env, model, obs):
         final_obs, reward, terminated, truncated, info = env.step(action_tensor)
         if bool(_to_numpy(truncated).reshape(-1)[0]):
             break
+        if model.check_success_each_step and env.get_wrapper_attr("is_task_success")():
+            break
 
-    return final_obs, info, truncated
+    # Same end-of-episode test as scripts/eval_policy.py, which runs right after this returns.
+    if bool(_to_numpy(truncated).reshape(-1)[0]) or env.get_wrapper_attr("is_task_success")():
+        model.log_episode_timing()
+
+    return final_obs, info, truncated, inference_times_s
 
 
 def reset_model(model):

@@ -31,3 +31,12 @@ smolvla_steps: 10
 smolvla_rescale_gripper: auto
 smolvla_gripper_indices: [6, 13]
 smolvla_gripper_source_range: [0.0, 1.0]
+# Stop executing the returned actions as soon as the task succeeds, as ACT and
+# DP do. false keeps the official behavior, which can overcount action steps by
+# up to smolvla_steps - 1.
+smolvla_check_success_each_step: false
+# If set to N, every call predicts a fresh chunk from the current observation
+# and executes only its first N actions (N <= chunk_size). null keeps the
+# LeRobot action queue, which replans every n_action_steps (50 for the
+# released checkpoints) regardless of smolvla_steps.
+smolvla_replan_steps: null

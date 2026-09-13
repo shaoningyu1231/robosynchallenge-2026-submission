@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -74,6 +75,11 @@ def _load_obs(obs_path: str) -> tuple[dict[str, np.ndarray], str]:
     return obs, task
 
 
+def _synchronize(device: str) -> None:
+    if str(device).startswith("cuda"):
+        torch.cuda.synchronize()
+
+
 def _send(payload: dict) -> None:
     sys.stdout.write(json.dumps(payload) + "\n")
     sys.stdout.flush()
@@ -109,12 +115,35 @@ def main() -> int:
 
                 num_actions = int(request.get("n_action_steps", 1))
                 actions = []
-                for _ in range(num_actions):
-                    action = policy.select_action(proc_obs)
-                    action = postprocessor(action)
-                    actions.append(action.squeeze(0).cpu().numpy().astype(np.float32).tolist())
+                forwards, forward_s = 0, 0.0
+                if request.get("replan", False):
+                    # Predict a fresh chunk from this observation and return its first
+                    # num_actions steps, bypassing the LeRobot action queue.
+                    chunk_size = int(policy.config.chunk_size)
+                    if not 1 <= num_actions <= chunk_size:
+                        raise ValueError(f"replan steps must be in [1, {chunk_size}], got {num_actions}")
+                    started = time.perf_counter()
+                    with torch.no_grad():
+                        chunk = policy.predict_action_chunk(proc_obs)
+                    _synchronize(args.device)
+                    forwards, forward_s = 1, time.perf_counter() - started
+                    for index in range(num_actions):
+                        action = postprocessor(chunk[:, index])
+                        actions.append(action.squeeze(0).cpu().numpy().astype(np.float32).tolist())
+                else:
+                    for _ in range(num_actions):
+                        # select_action only runs the model when its action queue is empty.
+                        runs_forward = policy._check_get_actions_condition()
+                        started = time.perf_counter()
+                        action = policy.select_action(proc_obs)
+                        if runs_forward:
+                            _synchronize(args.device)
+                            forwards += 1
+                            forward_s += time.perf_counter() - started
+                        action = postprocessor(action)
+                        actions.append(action.squeeze(0).cpu().numpy().astype(np.float32).tolist())
 
-            _send({"ok": True, "actions": actions})
+            _send({"ok": True, "actions": actions, "forwards": forwards, "forward_s": forward_s})
         except Exception as exc:  # noqa: BLE001
             _send({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
