@@ -615,6 +615,29 @@ def parse_args_and_config():
 
 
 
+def _flush_sim_cleanup():
+    """Finish the teardown that env.close() only queues.
+
+    SimulationManager.destroy() defers the C++ (dexsim/warp/CUDA) teardown and,
+    with EMBODICHAIN_SIM_EXIT_PROCESS=1 (the default), calls os._exit(0) to skip
+    it. That makes every failure look like a clean run: an exception inside the
+    eval loop reaches this finally, os._exit fires, and the process reports 0
+    with no traceback and no metrics file -- which is exactly how a uint8-image
+    crash was mistaken for a successful 0-step episode on 2026-09-12.
+
+    Setting EMBODICHAIN_SIM_EXIT_PROCESS=0 restores real exit codes, but then
+    the deferred teardown must be drained by hand or the interpreter finalizes
+    those resources in an unpredictable order and segfaults (exit 139). This is
+    the same pairing embodichain/lab/scripts/run_env.py uses.
+    """
+    try:
+        from embodichain.lab.sim.sim_manager import SimulationManager
+
+        SimulationManager.flush_cleanup_queue()
+    except Exception as exc:                                    # noqa: BLE001
+        print(f"  Warning: failed to flush simulation cleanup queue: {exc}")
+
+
 def main():
     config = parse_args_and_config()
     select_cuda_device(config)
@@ -863,6 +886,7 @@ def main():
         if video_recorder:
             video_recorder.close_episode(success=False)
         env.close()
+        _flush_sim_cleanup()
 
     inference_call_count = len(all_inference_times)
     average_action_steps = float(np.mean(action_steps))
