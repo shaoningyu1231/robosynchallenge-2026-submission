@@ -177,5 +177,65 @@ class WorkerRequest(unittest.TestCase):
         self.assertEqual(self.request_for(10, 25), (25, True))
 
 
+try:
+    import torch
+
+    from policy.smolvla import smolvla_worker
+except ImportError:      # torch lives in the SmolVLA env, not the sim env
+    torch = None
+    smolvla_worker = None
+
+
+@unittest.skipIf(smolvla_worker is None, "needs torch and the worker module")
+class WorkerImageDtype(unittest.TestCase):
+    """The camera frames the worker hands to the policy.
+
+    Frames cross IPC as uint8 and the checkpoint's preprocessor only moves
+    tensors to the device without casting, so an uncast frame reaches
+    F.interpolate(mode="bilinear") and CUDA raises
+    '"upsample_bilinear2d_out_frame" not implemented for Byte'. That happened on
+    the first real rollout, and none of the tests above could catch it: they
+    stop at the adapter and never inspect an image's dtype.
+    """
+
+    def obs(self, image):
+        return {
+            "observation.state": np.zeros(ACTION_DIM, dtype=np.float32),
+            "observation.images.cam_high": image,
+        }
+
+    def test_uint8_frames_become_float32_zero_to_one(self):
+        image = np.array([[[0, 128, 255]]], dtype=np.uint8)
+        out = smolvla_worker._obs_to_tensors(self.obs(image))["observation.images.cam_high"]
+        self.assertEqual(out.dtype, torch.float32)
+        self.assertAlmostEqual(out.flatten()[0].item(), 0.0, places=6)
+        self.assertAlmostEqual(out.flatten()[1].item(), 128 / 255, places=6)
+        self.assertAlmostEqual(out.flatten()[2].item(), 1.0, places=6)
+
+    def test_frame_shape_is_preserved(self):
+        image = np.zeros((2, 8, 6, 3), dtype=np.uint8)
+        out = smolvla_worker._obs_to_tensors(self.obs(image))["observation.images.cam_high"]
+        self.assertEqual(tuple(out.shape), (2, 8, 6, 3))
+
+    def test_float_frames_are_not_divided_twice(self):
+        image = np.full((1, 2, 2, 3), 0.5, dtype=np.float32)
+        out = smolvla_worker._obs_to_tensors(self.obs(image))["observation.images.cam_high"]
+        self.assertEqual(out.dtype, torch.float32)
+        self.assertAlmostEqual(out.flatten()[0].item(), 0.5, places=6)
+
+    def test_non_image_keys_keep_their_dtype(self):
+        obs = self.obs(np.zeros((1, 2, 2, 3), dtype=np.uint8))
+        obs["observation.qvel"] = np.zeros(ACTION_DIM, dtype=np.float64)
+        out = smolvla_worker._obs_to_tensors(obs)
+        self.assertEqual(out["observation.state"].dtype, torch.float32)
+        self.assertEqual(out["observation.qvel"].dtype, torch.float64)
+
+    def test_every_camera_is_converted(self):
+        obs = {f"observation.images.{name}": np.zeros((1, 2, 2, 3), dtype=np.uint8)
+               for name in ("cam_high", "cam_left_wrist", "cam_right_wrist")}
+        out = smolvla_worker._obs_to_tensors(obs)
+        self.assertEqual({t.dtype for t in out.values()}, {torch.float32})
+
+
 if __name__ == "__main__":
     unittest.main()

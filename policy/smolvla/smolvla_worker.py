@@ -90,6 +90,33 @@ def _load_obs(obs_path: str) -> tuple[dict[str, np.ndarray], str]:
     return obs, task
 
 
+IMAGE_KEY_PREFIX = "observation.images."
+
+
+def _obs_to_tensors(obs: dict[str, np.ndarray]) -> dict[str, "torch.Tensor"]:
+    """Convert the observation to tensors, casting camera frames to float32 [0, 1].
+
+    Frames cross the IPC boundary as uint8, which keeps the temporary NPZ a
+    quarter of the size for three cameras. The checkpoint's preprocessor only
+    moves tensors to the device, it never casts them, so a Byte frame reaches
+    SmolVLA's resize_with_pad and F.interpolate(mode="bilinear"), which CUDA
+    does not implement:
+
+        NotImplementedError: "upsample_bilinear2d_out_frame" not implemented for 'Byte'
+
+    Casting here rather than before the IPC keeps the transfer small and gives
+    the policy the [0, 1] float32 it documents. Frames that already arrive as
+    float are passed through untouched.
+    """
+    tensors = {}
+    for key, value in obs.items():
+        tensor = torch.from_numpy(value)
+        if key.startswith(IMAGE_KEY_PREFIX) and tensor.dtype == torch.uint8:
+            tensor = tensor.to(torch.float32).div_(255.0)
+        tensors[key] = tensor
+    return tensors
+
+
 def _synchronize(device: str) -> None:
     if str(device).startswith("cuda"):
         torch.cuda.synchronize()
@@ -124,7 +151,7 @@ def main() -> int:
 
             with contextlib.redirect_stdout(sys.stderr):
                 obs, task = _load_obs(request["obs_path"])
-                obs = {key: torch.from_numpy(value) for key, value in obs.items()}
+                obs = _obs_to_tensors(obs)
                 obs["task"] = task
                 proc_obs = preprocessor(obs)
 
