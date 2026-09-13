@@ -1,0 +1,91 @@
+# TEST CONFIGURATION -- NOT THE SUBMISSION.
+# The official per-task SmolVLA checkpoints at the revisions the leaderboard
+# evaluated (site data, 2026-09-03). Used only to check this adapter against a
+# known baseline:
+#   SMOLVLA_DEPLOY_CONFIG=policy/smolvla_multitask/test_configs/official_baseline.yml \
+#     bash policy/smolvla_multitask/eval.sh <task_name> <setting> <gpu_id>
+
+policy_name: smolvla_multitask
+task_name: click_bell
+setting: clear
+model_name: official_smolvla_baseline
+seed: 0
+max_episodes: 1
+max_steps: 100
+headless: true
+device: cpu
+renderer: auto
+gpu_id: 0
+pytorch_device: cuda
+num_envs: 1
+filter_dataset_saving: true
+eval_video_log: false
+eval_video_obs_key: cam_high
+eval_expert_check: true
+
+# ------------------------------------------------------------------
+# Which checkpoint each task is evaluated with, in this order
+# (policy/smolvla_multitask/checkpoints.py):
+#   1. checkpoint_dir, when given: a local directory; a LeRobot step directory
+#      containing pretrained_model/ is also accepted
+#   2. checkpoints.tasks.<task_name>
+#   3. checkpoints.default
+#   4. otherwise the evaluation stops with an error. It never falls back to
+#      the official per-task checkpoints.
+# Hugging Face entries take exactly repo_id and a full 40-character commit
+# hash as revision, and must download without logging in.
+# ------------------------------------------------------------------
+checkpoint_dir: ""
+checkpoints:
+  default: null
+  tasks:
+    table_rearrangement:
+      repo_id: RoboSynChallenge/SmolVLA_sim_table_rearrangement
+      revision: 913b29a7136876108a330aead1855309f985cbd8
+    click_bell:
+      repo_id: RoboSynChallenge/SmolVLA_sim_click_bell
+      revision: 27965b7e2432f5a3084f2c60a04bff7c5a47b853
+    water_pouring:
+      repo_id: RoboSynChallenge/SmolVLA_sim_water_pouring
+      revision: 2bf5d9c2d8d0b5820ba5c9fe6284c5ff8647561f
+    handle_basket:
+      repo_id: RoboSynChallenge/SmolVLA_sim_handle_basket
+      revision: 0de9a93f124bd4ebe2fbd0d572ce3133806b82a9
+    items_handover:
+      repo_id: RoboSynChallenge/SmolVLA_sim_items_handover
+      revision: fabe9462853965228e90e34bd517aa4e43bad323
+    drawer_open_place:
+      repo_id: RoboSynChallenge/SmolVLA_sim_drawer_open_place
+      revision: c0088d84a568f93fb4401aabafcc41cf643efcdd
+    mixer_operating:
+      repo_id: RoboSynChallenge/SmolVLA_sim_mixer_operating
+      revision: 42311ef3e795079caefee7a28f05c967caa870ac
+    item_assembly:
+      repo_id: RoboSynChallenge/SmolVLA_sim_item_assembly
+      revision: db32020164ed2c7264804a5eb036a38a07d879ca
+    manipulate_pipette:
+      repo_id: RoboSynChallenge/SmolVLA_sim_manipulate_pipette
+      revision: dd0e80bc7d5fa5081e1fa07f1b7115bad6dbffa0
+    sample_loading:
+      repo_id: RoboSynChallenge/SmolVLA_sim_sample_loading
+      revision: 2a4f41ab3be8e5f544c890d6054bc8de3be5c53b
+
+# Optional. If empty, the worker imports the lerobot installed in its Python
+# (policy/smolvla_multitask/setup_lerobot.sh installs it into .venv).
+lerobot_root: ""
+# Optional. If empty, SMOLVLA_PYTHON, which eval.sh points at .venv when it exists.
+smolvla_python: ""
+smolvla_cuda_visible_devices: 0
+smolvla_steps: 10
+smolvla_rescale_gripper: auto
+smolvla_gripper_indices: [6, 13]
+smolvla_gripper_source_range: [0.0, 1.0]
+# Stop executing the returned actions as soon as the task succeeds, as ACT and
+# DP do. false keeps the official behavior, which can overcount action steps by
+# up to smolvla_steps - 1.
+smolvla_check_success_each_step: false
+# If set to N, every call predicts a fresh chunk from the current observation
+# and executes only its first N actions (N <= chunk_size). null keeps the
+# LeRobot action queue, which replans every n_action_steps (50 for the
+# released checkpoints) regardless of smolvla_steps.
+smolvla_replan_steps: null

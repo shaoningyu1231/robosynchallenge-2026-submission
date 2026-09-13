@@ -1,9 +1,12 @@
-# SmolVLA Policy Evaluation Configuration
+# SmolVLA multi-task submission: evaluation configuration
+#
+# Standard command (see policy/smolvla_multitask/README.md):
+#   bash policy/smolvla_multitask/eval.sh <task_name> <setting> <gpu_id> [--key value ...]
 
-policy_name: smolvla
+policy_name: smolvla_multitask
 task_name: click_bell
 setting: clear
-model_name: smolvla
+model_name: smolvla_multitask
 seed: 0
 max_episodes: 1
 max_steps: 100
@@ -18,13 +21,32 @@ eval_video_log: false
 eval_video_obs_key: cam_high
 eval_expert_check: true
 
-# eval.sh supplies checkpoint_dir from its third argument. A checkpoint step
-# directory containing pretrained_model/ is also accepted.
+# ------------------------------------------------------------------
+# Which checkpoint each task is evaluated with, in this order
+# (policy/smolvla_multitask/checkpoints.py):
+#   1. checkpoint_dir, when given: a local directory; a LeRobot step directory
+#      containing pretrained_model/ is also accepted
+#   2. checkpoints.tasks.<task_name>
+#   3. checkpoints.default
+#   4. otherwise the evaluation stops with an error. It never falls back to
+#      the official per-task checkpoints.
+# Hugging Face entries take exactly repo_id and a full 40-character commit
+# hash as revision, and must download without logging in.
+# ------------------------------------------------------------------
 checkpoint_dir: ""
-# Optional. If empty, the worker imports the installed lerobot package. You can
-# also set SMOLVLA_LEROBOT_ROOT or pass --lerobot_root policy/smolvla/lerobot.
+checkpoints:
+  # The shared multi-task model. Filled in once it is published.
+  default: null
+  # Per-task overrides, e.g.
+  #   click_bell:
+  #     repo_id: org/name
+  #     revision: 0123456789abcdef0123456789abcdef01234567
+  tasks: {}
+
+# Optional. If empty, the worker imports the lerobot installed in its Python
+# (policy/smolvla_multitask/setup_lerobot.sh installs it into .venv).
 lerobot_root: ""
-# Optional. If empty, eval uses SMOLVLA_PYTHON or the current eval Python.
+# Optional. If empty, SMOLVLA_PYTHON, which eval.sh points at .venv when it exists.
 smolvla_python: ""
 smolvla_cuda_visible_devices: 0
 smolvla_steps: 10

@@ -1,5 +1,5 @@
 # ----------------------------------------------------------------------------
-# SmolVLA Policy Adapter for RoboSynChallenge
+# SmolVLA multi-task submission adapter for RoboSynChallenge (checkpoint choice: checkpoints.py)
 # ----------------------------------------------------------------------------
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import numpy as np
 import torch
 
 from policy.inference_timing import finish_inference, start_inference
+from policy.smolvla_multitask.checkpoints import materialize, resolve_source
 
 
 def _to_numpy(value) -> np.ndarray:
@@ -364,8 +365,20 @@ class SmolVLAWorkerClient:
 
 
 def get_model(usr_args):
-    if "checkpoint_dir" not in usr_args or not usr_args["checkpoint_dir"]:
-        raise ValueError("checkpoint_dir must be provided in deploy_policy.yml or overrides.")
+    # Order and rules live in checkpoints.py: explicit checkpoint_dir, then the
+    # task's entry, then the default; never the official checkpoints by accident.
+    source = resolve_source(usr_args)
+    python_bin = usr_args.get("smolvla_python") or os.environ.get("SMOLVLA_PYTHON") or sys.executable
+    checkpoint_dir = materialize(source, python_bin)
+    print(
+        f"Checkpoint for {usr_args['task_name']}: {source.describe()} "
+        f"(from {source.origin}) -> {checkpoint_dir}",
+        flush=True,
+    )
+    usr_args["checkpoint_dir"] = str(checkpoint_dir)
+    # eval_policy.py copies checkpoint_path into evaluation_metrics.json, so the
+    # metrics say which weights produced them.
+    usr_args["checkpoint_path"] = source.describe()
     return SmolVLAWorkerClient(usr_args)
 
 
