@@ -26,7 +26,37 @@ SMOLVLA_CONDA_ENV="${SMOLVLA_CONDA_ENV:-smolvla}"
 LEROBOT_ROOT="${LEROBOT_ROOT:-${SMOLVLA_LEROBOT_ROOT:-}}"
 DATASET_REPO_ID="${SMOLVLA_DATASET_REPO_ID:-RoboSynChallenge/cobotmagic_Sim_${TASK_NAME}}"
 JOB_NAME="${SMOLVLA_JOB_NAME:-$(basename "$OUTPUT_DIR")}"
-RENAME_MAP="${SMOLVLA_RENAME_MAP:-{\"observation.qpos\":\"observation.state\",\"cam_high.color\":\"observation.images.camera1\",\"cam_left_wrist.color\":\"observation.images.camera2\",\"cam_right_wrist.color\":\"observation.images.camera3\"}}"
+# Feature-key rename map passed to lerobot-train.
+#
+# Default is empty. Datasets from server/normalize_v21_dataset.py already use
+# observation.state and observation.images.cam_high / cam_left_wrist /
+# cam_right_wrist, so there is nothing to rename -- and a non-empty map is not
+# harmless: LeRobot b6ec006 (configs/train.py) rejects any rename_map when the
+# policy is built fresh with --policy.type rather than loaded from a checkpoint,
+# failing with "`rename_map` requires a pretrained policy checkpoint". The old
+# default did exactly that, so the pilot would have died at config validation.
+#
+# SMOLVLA_RENAME_MAP=legacy restores the original mapping from the raw v2.1 key
+# names to camera1/2/3. It only makes sense on LeRobot versions that allow it, or
+# together with a pretrained --policy.path; b6ec006 cannot read v2.1 data at all,
+# so normalising first is the path that works here. Any other value is taken as
+# literal JSON.
+LEGACY_RENAME_MAP='{"observation.qpos":"observation.state","cam_high.color":"observation.images.camera1","cam_left_wrist.color":"observation.images.camera2","cam_right_wrist.color":"observation.images.camera3"}'
+case "${SMOLVLA_RENAME_MAP:-}" in
+    "")     RENAME_MAP='{}' ;;
+    legacy) RENAME_MAP="$LEGACY_RENAME_MAP" ;;
+    *)      RENAME_MAP="$SMOLVLA_RENAME_MAP" ;;
+esac
+if [[ "$RENAME_MAP" != "{}" ]]; then
+    has_policy_path=0
+    for arg in "${EXTRA_ARGS[@]}"; do
+        [[ "$arg" == --policy.path* ]] && has_policy_path=1
+    done
+    if (( ! has_policy_path )); then
+        echo "Warning: a non-empty rename_map with --policy.type=smolvla and no --policy.path is" >&2
+        echo "         rejected by LeRobot b6ec006 and newer. Expect a config validation error." >&2
+    fi
+fi
 
 if [[ ! -d "$DATASET_ROOT" ]]; then
     echo "Error: dataset root does not exist: $DATASET_ROOT" >&2
