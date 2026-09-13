@@ -19,9 +19,10 @@
 # is not reproducible in either direction.
 #
 # Environment:
-#   PYTHON312     Python 3.12 interpreter to build the venv from (default: uv's python 3.12)
-#   PIP_INDEX_URL package index (default: uv's default, PyPI)
-#   LEROBOT_REPO  LeRobot git URL (default: GitHub)
+#   PYTHON312         Python 3.12 interpreter to build the venv from (default: uv's python 3.12)
+#   UV_DEFAULT_INDEX  package index (default: PyPI), e.g. a local PyPI mirror
+#   UV_CACHE_DIR      uv's cache; on the same disk as .venv, packages are hard-linked, not copied
+#   LEROBOT_REPO      LeRobot git URL or local clone (default: GitHub)
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
