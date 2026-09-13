@@ -34,18 +34,33 @@ def _load_runtime(args: argparse.Namespace):
 
     try:
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
-        from lerobot.processor import (
-            PolicyProcessorPipeline,
-            batch_to_transition,
-            policy_action_to_transition,
-            transition_to_batch,
-            transition_to_policy_action,
-        )
+        from lerobot.processor import PolicyProcessorPipeline
     except ModuleNotFoundError as exc:
         raise ModuleNotFoundError(
             "Cannot import lerobot. Install LeRobot in the SmolVLA Python env, "
             "or run policy/smolvla/setup_lerobot.sh and set SMOLVLA_LEROBOT_ROOT."
         ) from exc
+
+    # The converters live in lerobot.processor.converters and are re-exported
+    # from the package root only on newer LeRobot. Release 0.4.4 exports just
+    # two of the four, so importing them all from the root raises ImportError --
+    # which the handler above does not catch, since a missing *name* is not a
+    # ModuleNotFoundError. Take the root first, fall back to the module that has
+    # held them all along.
+    try:
+        from lerobot.processor import (
+            batch_to_transition,
+            policy_action_to_transition,
+            transition_to_batch,
+            transition_to_policy_action,
+        )
+    except ImportError:
+        from lerobot.processor.converters import (
+            batch_to_transition,
+            policy_action_to_transition,
+            transition_to_batch,
+            transition_to_policy_action,
+        )
 
     checkpoint_dir = str(Path(args.checkpoint_dir).resolve())
     policy = SmolVLAPolicy.from_pretrained(checkpoint_dir)
