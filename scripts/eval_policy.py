@@ -882,98 +882,106 @@ def main():
                   f"{success_count}/{episode+1} = {100*success_count/(episode+1):.1f}%")
             episode += 1
             current_episode_seed_attempts = 0
+        # Write the metrics before any teardown. SimulationManager's cleanup can
+        # segfault after the last episode (item_assembly did, 2026-09-13), and a
+        # segfault skips everything after it; with the metrics written here
+        # first, completed episodes are never lost to a crash in close().
+        inference_call_count = len(all_inference_times)
+        average_action_steps = float(np.mean(action_steps))
+        summary = {
+            "episode_count": len(action_steps),
+            "success_count": success_count,
+            "success_rate": success_count / len(action_steps),
+            "average_action_steps": average_action_steps,
+            "average_action_steps_ratio": average_action_steps / max_env_steps,
+            "inference_call_count": inference_call_count,
+            "average_inference_calls_per_episode": inference_call_count / len(action_steps),
+            "average_inference_time_seconds": (
+                float(np.mean(all_inference_times)) if all_inference_times else None
+            ),
+            "average_inference_time_per_episode_seconds": float(
+                np.mean(episode_inference_totals)
+            ),
+        }
+        result_payload = {
+            "schema_version": 1,
+            "created_at": datetime.now().astimezone().isoformat(),
+            "config": {
+                "policy": policy_name,
+                "task": task_name,
+                "setting": config.get("setting"),
+                "checkpoint_path": config.get("checkpoint_path"),
+                "dp_num_inference_steps": config.get("dp_num_inference_steps"),
+                "episode_count": max_episodes,
+                "timeout_action_steps": max_env_steps,
+                "seed": seed,
+                "fixed_episode_seed": fixed_episode_seed,
+            },
+            "inference_timing_scope": (
+                "raw observation preprocessing and transfer through executable action; "
+                "env.step excluded"
+            ),
+            "platform": platform_metadata,
+            "summary": summary,
+            "episodes": episode_results,
+            "feasibility_filter": {
+                "enabled": expert_check,
+                "max_candidate_seed_attempts_per_episode": (
+                    max_seed_attempts_per_episode
+                ),
+                "candidate_seed_attempt_count": candidate_seed_attempts,
+                "accepted_episode_count": len(episode_results),
+                "skipped_seed_count": len(skipped_episode_seeds),
+                "skipped_seeds": skipped_episode_seeds,
+            },
+        }
+        with result_path.open("w", encoding="utf-8") as result_file:
+            json.dump(result_payload, result_file, indent=2, ensure_ascii=False)
+            result_file.write("\n")
+
+        average_inference_time = summary["average_inference_time_seconds"]
+        print(f"\n{'='*50}")
+        print(
+            f"  Evaluation Results Summary: {success_count}/{max_episodes} "
+            f"({100*success_count/max_episodes:.1f}%)"
+        )
+        print(
+            f"  Average action steps: {summary['average_action_steps']:.2f}/"
+            f"{max_env_steps} ({100*summary['average_action_steps_ratio']:.2f}%; "
+            f"failed episodes count as {max_env_steps} steps)"
+        )
+        if average_inference_time is None:
+            print("  Average inference time: n/a (no inference calls recorded)")
+        else:
+            print(
+                f"  Average inference latency: {average_inference_time:.6f}s "
+                f"({1000*average_inference_time:.3f}ms) over "
+                f"{summary['inference_call_count']} model calls"
+            )
+            print(
+                "  Average total inference time per episode: "
+                f"{summary['average_inference_time_per_episode_seconds']:.6f}s "
+                f"over {summary['average_inference_calls_per_episode']:.2f} model calls"
+            )
+        print(f"  Timing platform: {format_platform(platform_metadata)}")
+        if expert_check:
+            print(
+                "  Expert feasibility filter: "
+                f"accepted {len(episode_results)}/{candidate_seed_attempts} candidate "
+                f"seeds; skipped {len(skipped_episode_seeds)}"
+            )
+        print(f"  Metrics saved to: {result_path}")
+        print(f"{'='*50}")
     finally:
         if video_recorder:
             video_recorder.close_episode(success=False)
+        # Bracket each teardown call, flushed, so a crash here can be placed in
+        # one of the two from the last line of the log.
+        print("[cleanup] env.close() start", flush=True)
         env.close()
+        print("[cleanup] env.close() done; flush_cleanup_queue() start", flush=True)
         _flush_sim_cleanup()
-
-    inference_call_count = len(all_inference_times)
-    average_action_steps = float(np.mean(action_steps))
-    summary = {
-        "episode_count": len(action_steps),
-        "success_count": success_count,
-        "success_rate": success_count / len(action_steps),
-        "average_action_steps": average_action_steps,
-        "average_action_steps_ratio": average_action_steps / max_env_steps,
-        "inference_call_count": inference_call_count,
-        "average_inference_calls_per_episode": inference_call_count / len(action_steps),
-        "average_inference_time_seconds": (
-            float(np.mean(all_inference_times)) if all_inference_times else None
-        ),
-        "average_inference_time_per_episode_seconds": float(
-            np.mean(episode_inference_totals)
-        ),
-    }
-    result_payload = {
-        "schema_version": 1,
-        "created_at": datetime.now().astimezone().isoformat(),
-        "config": {
-            "policy": policy_name,
-            "task": task_name,
-            "setting": config.get("setting"),
-            "checkpoint_path": config.get("checkpoint_path"),
-            "dp_num_inference_steps": config.get("dp_num_inference_steps"),
-            "episode_count": max_episodes,
-            "timeout_action_steps": max_env_steps,
-            "seed": seed,
-            "fixed_episode_seed": fixed_episode_seed,
-        },
-        "inference_timing_scope": (
-            "raw observation preprocessing and transfer through executable action; "
-            "env.step excluded"
-        ),
-        "platform": platform_metadata,
-        "summary": summary,
-        "episodes": episode_results,
-        "feasibility_filter": {
-            "enabled": expert_check,
-            "max_candidate_seed_attempts_per_episode": (
-                max_seed_attempts_per_episode
-            ),
-            "candidate_seed_attempt_count": candidate_seed_attempts,
-            "accepted_episode_count": len(episode_results),
-            "skipped_seed_count": len(skipped_episode_seeds),
-            "skipped_seeds": skipped_episode_seeds,
-        },
-    }
-    with result_path.open("w", encoding="utf-8") as result_file:
-        json.dump(result_payload, result_file, indent=2, ensure_ascii=False)
-        result_file.write("\n")
-
-    average_inference_time = summary["average_inference_time_seconds"]
-    print(f"\n{'='*50}")
-    print(
-        f"  Evaluation Results Summary: {success_count}/{max_episodes} "
-        f"({100*success_count/max_episodes:.1f}%)"
-    )
-    print(
-        f"  Average action steps: {summary['average_action_steps']:.2f}/"
-        f"{max_env_steps} ({100*summary['average_action_steps_ratio']:.2f}%; "
-        f"failed episodes count as {max_env_steps} steps)"
-    )
-    if average_inference_time is None:
-        print("  Average inference time: n/a (no inference calls recorded)")
-    else:
-        print(
-            f"  Average inference latency: {average_inference_time:.6f}s "
-            f"({1000*average_inference_time:.3f}ms) over "
-            f"{summary['inference_call_count']} model calls"
-        )
-        print(
-            "  Average total inference time per episode: "
-            f"{summary['average_inference_time_per_episode_seconds']:.6f}s "
-            f"over {summary['average_inference_calls_per_episode']:.2f} model calls"
-        )
-    print(f"  Timing platform: {format_platform(platform_metadata)}")
-    if expert_check:
-        print(
-            "  Expert feasibility filter: "
-            f"accepted {len(episode_results)}/{candidate_seed_attempts} candidate "
-            f"seeds; skipped {len(skipped_episode_seeds)}"
-        )
-    print(f"  Metrics saved to: {result_path}")
-    print(f"{'='*50}")
+        print("[cleanup] flush_cleanup_queue() done", flush=True)
 
 
 if __name__ == "__main__":
