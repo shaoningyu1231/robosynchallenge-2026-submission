@@ -217,3 +217,7 @@ eval_result/
 
 **/results/
 .codex
+
+# Built by policy/smolvla_multitask/setup_lerobot.sh
+policy/smolvla_multitask/lerobot/
+policy/smolvla_multitask/.venv/
