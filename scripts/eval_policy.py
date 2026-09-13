@@ -911,6 +911,9 @@ def main():
                 "task": task_name,
                 "setting": config.get("setting"),
                 "checkpoint_path": config.get("checkpoint_path"),
+                # Set by adapters that resolve their own weights (smolvla_multitask:
+                # policy and VLM repo, revision and local path); None otherwise.
+                "checkpoint_metadata": config.get("checkpoint_metadata"),
                 "dp_num_inference_steps": config.get("dp_num_inference_steps"),
                 "episode_count": max_episodes,
                 "timeout_action_steps": max_env_steps,

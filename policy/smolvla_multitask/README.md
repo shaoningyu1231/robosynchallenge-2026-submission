@@ -61,6 +61,14 @@ There is no fallback to the official checkpoints. Hugging Face entries give
 downloaded anonymously into the Hugging Face cache on first use, so they must be
 public. Downloads honour `HF_ENDPOINT`, `HF_HOME` and `HF_HUB_OFFLINE`.
 
+The VLM backbone is pinned the same way, by the `vlm` entry. A SmolVLA checkpoint
+names its backbone only by repo id, which LeRobot would otherwise load from the
+Hub's current main. The adapter downloads the pinned snapshot, the worker checks
+that the checkpoint was trained on that repo and loads the weights, processor and
+tokenizer from the local snapshot, and the worker runs with `HF_HUB_OFFLINE=1`.
+`config.checkpoint_metadata` in the metrics records the repo, revision and local
+path of both the policy checkpoint and the VLM.
+
 ## Baseline check
 
 `test_configs/official_baseline.yml` maps every task to the official

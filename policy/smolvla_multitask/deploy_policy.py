@@ -16,7 +16,7 @@ import numpy as np
 import torch
 
 from policy.inference_timing import finish_inference, start_inference
-from policy.smolvla_multitask.checkpoints import materialize, resolve_source
+from policy.smolvla_multitask.checkpoints import VLM_REQUIRED_FILES, materialize, resolve_source, resolve_vlm
 
 
 def _to_numpy(value) -> np.ndarray:
@@ -185,6 +185,14 @@ class SmolVLAWorkerClient:
         ]
         if self.lerobot_root is not None:
             worker_cmd.extend(["--lerobot-root", str(self.lerobot_root)])
+        vlm_path = usr_args.get("smolvla_vlm_path")
+        if vlm_path:
+            worker_cmd.extend(["--vlm-path", str(vlm_path), "--vlm-repo-id", str(usr_args["smolvla_vlm_repo_id"])])
+            # Everything the worker needs is local by now (checkpoint and pinned
+            # VLM). Offline mode turns any remaining lookup by repo id into an
+            # error instead of a quiet download of the Hub's current main.
+            worker_env["HF_HUB_OFFLINE"] = "1"
+            worker_env["TRANSFORMERS_OFFLINE"] = "1"
         self.proc = subprocess.Popen(
             worker_cmd,
             stdin=subprocess.PIPE,
@@ -368,17 +376,31 @@ def get_model(usr_args):
     # Order and rules live in checkpoints.py: explicit checkpoint_dir, then the
     # task's entry, then the default; never the official checkpoints by accident.
     source = resolve_source(usr_args)
+    vlm = resolve_vlm(usr_args)
     python_bin = usr_args.get("smolvla_python") or os.environ.get("SMOLVLA_PYTHON") or sys.executable
     checkpoint_dir = materialize(source, python_bin)
+    vlm_dir = materialize(vlm, python_bin, required=VLM_REQUIRED_FILES)
     print(
         f"Checkpoint for {usr_args['task_name']}: {source.describe()} "
-        f"(from {source.origin}) -> {checkpoint_dir}",
+        f"(from {source.origin}) -> {checkpoint_dir}\n"
+        f"VLM backbone: {vlm.describe()} -> {vlm_dir}",
         flush=True,
     )
     usr_args["checkpoint_dir"] = str(checkpoint_dir)
-    # eval_policy.py copies checkpoint_path into evaluation_metrics.json, so the
-    # metrics say which weights produced them.
+    usr_args["smolvla_vlm_path"] = str(vlm_dir)
+    usr_args["smolvla_vlm_repo_id"] = vlm.repo_id
+    # eval_policy.py copies these into evaluation_metrics.json, so the metrics say
+    # exactly which weights produced them.
     usr_args["checkpoint_path"] = source.describe()
+    usr_args["checkpoint_metadata"] = {
+        "policy": {
+            "origin": source.origin,
+            "repo_id": source.repo_id,
+            "revision": source.revision,
+            "path": str(checkpoint_dir),
+        },
+        "vlm": {"repo_id": vlm.repo_id, "revision": vlm.revision, "path": str(vlm_dir)},
+    }
     return SmolVLAWorkerClient(usr_args)
 
 

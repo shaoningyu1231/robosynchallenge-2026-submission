@@ -70,6 +70,15 @@ checkpoints:
       repo_id: RoboSynChallenge/SmolVLA_sim_sample_loading
       revision: 2a4f41ab3be8e5f544c890d6054bc8de3be5c53b
 
+# ------------------------------------------------------------------
+# The VLM backbone, pinned like the checkpoints. A SmolVLA checkpoint names it
+# by repo id only; without this LeRobot would load the Hub's current main. The
+# checkpoint's own vlm_model_name must equal repo_id.
+# ------------------------------------------------------------------
+vlm:
+  repo_id: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
+  revision: 7b375e1b73b11138ff12fe22c8f2822d8fe03467
+
 # Optional. If empty, the worker imports the lerobot installed in its Python
 # (policy/smolvla_multitask/setup_lerobot.sh installs it into .venv).
 lerobot_root: ""

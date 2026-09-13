@@ -32,6 +32,10 @@ the vision encoder frozen; the action expert is trained from scratch. No
 `smolvla_base` or other robot-pretrained weights. These fields match the
 `train_config.json` of the official `SmolVLA_sim_click_bell` checkpoint.
 
+The backbone revision is enforced at evaluation, not only documented: the `vlm`
+entry of `deploy_policy.yml` pins it, and the worker loads it from that local
+snapshot with the Hub offline.
+
 ## Data
 
 Only the official simulation datasets, 1000 episodes per task, at these revisions:

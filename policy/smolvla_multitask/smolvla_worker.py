@@ -18,7 +18,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-dir", required=True)
     parser.add_argument("--lerobot-root", default="")
     parser.add_argument("--device", default="cuda")
-    return parser.parse_args()
+    # The pinned VLM snapshot (deploy_policy.yml `vlm`), downloaded by the adapter.
+    # Both or neither: the repo id is what the checkpoint must have been trained on.
+    parser.add_argument("--vlm-path", default="")
+    parser.add_argument("--vlm-repo-id", default="")
+    args = parser.parse_args()
+    if bool(args.vlm_path) != bool(args.vlm_repo_id):
+        parser.error("--vlm-path and --vlm-repo-id go together")
+    return args
 
 
 def _load_runtime(args: argparse.Namespace):
@@ -33,6 +40,7 @@ def _load_runtime(args: argparse.Namespace):
             )
 
     try:
+        from lerobot.configs import PreTrainedConfig
         from lerobot.policies.smolvla.modeling_smolvla import SmolVLAPolicy
         from lerobot.processor import PolicyProcessorPipeline
     except ModuleNotFoundError as exc:
@@ -63,14 +71,27 @@ def _load_runtime(args: argparse.Namespace):
         )
 
     checkpoint_dir = str(Path(args.checkpoint_dir).resolve())
-    policy = SmolVLAPolicy.from_pretrained(checkpoint_dir)
+    config = PreTrainedConfig.from_pretrained(checkpoint_dir)
+    preprocessor_overrides = {"device_processor": {"device": args.device}}
+    if args.vlm_path:
+        # The checkpoint names its backbone by repo id only, and LeRobot would load
+        # that id from the Hub's current main: the VLM weights and processor in
+        # SmolVLMWithExpertModel, the tokenizer in the preprocessor. Point all three
+        # at the pinned snapshot. The adapter also starts this process with
+        # HF_HUB_OFFLINE=1, so anything still asking the Hub by name fails loudly.
+        from checkpoints import pin_vlm
+
+        pin_vlm(config, args.vlm_repo_id, args.vlm_path)
+        preprocessor_overrides["tokenizer_processor"] = {"tokenizer_name": args.vlm_path}
+        print(f"VLM backbone pinned: {args.vlm_repo_id} -> {args.vlm_path}", flush=True)
+    policy = SmolVLAPolicy.from_pretrained(checkpoint_dir, config=config)
     policy.to(args.device)
     policy.eval()
 
     preprocessor = PolicyProcessorPipeline.from_pretrained(
         checkpoint_dir,
         config_filename="policy_preprocessor.json",
-        overrides={"device_processor": {"device": args.device}},
+        overrides=preprocessor_overrides,
         to_transition=batch_to_transition,
         to_output=transition_to_batch,
     )

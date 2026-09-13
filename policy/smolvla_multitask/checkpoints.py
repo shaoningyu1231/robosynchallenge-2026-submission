@@ -12,6 +12,11 @@
 # task were silently missing from the table, the evaluation would score the
 # official model under this submission's name; failing is the only safe answer.
 #
+# The VLM backbone is pinned the same way (the `vlm` entry). A SmolVLA checkpoint
+# names its backbone only by repo id, and LeRobot loads that id -- weights,
+# config, processor and tokenizer -- from the Hub's current main. Without the
+# pin an empty cache would build the model on whatever main is that day.
+#
 # Standard library only, so it can be tested without torch or the simulator.
 
 from __future__ import annotations
@@ -31,6 +36,10 @@ REPO_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
 ENTRY_KEYS = {"repo_id", "revision"}
 # Files a LeRobot SmolVLA checkpoint cannot load without.
 REQUIRED_FILES = ("config.json", "model.safetensors")
+# Files the pinned VLM snapshot must provide: the checkpoints set
+# load_vlm_weights, so the backbone weights are read before the checkpoint's
+# own weights replace them, and the processor and tokenizer come from here too.
+VLM_REQUIRED_FILES = ("config.json", "model.safetensors", "processor_config.json", "tokenizer.json")
 
 
 class CheckpointError(RuntimeError):
@@ -126,21 +135,42 @@ def resolve_source(usr_args: dict, tasks: set[str] | None = None) -> CheckpointS
     )
 
 
-def check_checkpoint_dir(path: Path) -> Path:
-    missing = [name for name in REQUIRED_FILES if not (path / name).is_file()]
+def resolve_vlm(usr_args: dict) -> CheckpointSource:
+    entry = usr_args.get("vlm")
+    if entry is None:
+        raise CheckpointError("vlm is not set; the VLM backbone must be pinned to a repo_id and full revision")
+    repo_id, revision = _hf_entry(entry, "vlm")
+    return CheckpointSource(origin="vlm", repo_id=repo_id, revision=revision)
+
+
+def pin_vlm(config, repo_id: str, local_dir) -> None:
+    """Point a loaded SmolVLA config at the pinned local VLM snapshot.
+
+    Refuses a checkpoint trained on a different backbone than the one pinned:
+    loading it would silently pair its expert with the wrong VLM.
+    """
+    if config.vlm_model_name != repo_id:
+        raise CheckpointError(
+            f"checkpoint uses VLM {config.vlm_model_name!r}, but the pinned VLM is {repo_id!r}"
+        )
+    config.vlm_model_name = str(local_dir)
+
+
+def check_checkpoint_dir(path: Path, required=REQUIRED_FILES) -> Path:
+    missing = [name for name in required if not (path / name).is_file()]
     if missing:
-        raise CheckpointError(f"{path} is not a SmolVLA checkpoint: missing {missing}")
+        raise CheckpointError(f"{path} is incomplete: missing {missing}")
     return path
 
 
-def materialize(source: CheckpointSource, python_bin: str) -> Path:
+def materialize(source: CheckpointSource, python_bin: str, required=REQUIRED_FILES) -> Path:
     """Return a local directory holding the checkpoint, downloading it if needed.
 
     The download runs in the worker's Python, which is the one guaranteed to
     have huggingface_hub; the simulator's Python may not.
     """
     if source.local_dir is not None:
-        return check_checkpoint_dir(source.local_dir)
+        return check_checkpoint_dir(source.local_dir, required)
     cmd = [python_bin, str(FETCH_SCRIPT), "--repo-id", source.repo_id, "--revision", source.revision]
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, text=True)
     if proc.returncode != 0:
@@ -148,7 +178,7 @@ def materialize(source: CheckpointSource, python_bin: str) -> Path:
             f"downloading {source.describe()} failed (exit {proc.returncode}); "
             "the repository must be public and the revision must exist"
         )
-    return check_checkpoint_dir(parse_fetch_output(proc.stdout, source.revision))
+    return check_checkpoint_dir(parse_fetch_output(proc.stdout, source.revision), required)
 
 
 def parse_fetch_output(stdout: str, revision: str) -> Path:

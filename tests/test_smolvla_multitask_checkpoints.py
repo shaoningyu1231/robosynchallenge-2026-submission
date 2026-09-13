@@ -116,6 +116,28 @@ class EntryValidation(unittest.TestCase):
         self.assertLessEqual(OFFICIAL_TASKS, checkpoints.known_tasks())
 
 
+class VlmPin(unittest.TestCase):
+    PINNED = {"repo_id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct", "revision": REV_A}
+
+    def test_vlm_must_be_pinned_to_a_full_revision(self):
+        self.assertEqual(checkpoints.resolve_vlm({"vlm": self.PINNED}).describe(), f"hf://{self.PINNED['repo_id']}@{REV_A}")
+        with self.assertRaisesRegex(checkpoints.CheckpointError, "must be pinned"):
+            checkpoints.resolve_vlm({})
+        with self.assertRaisesRegex(checkpoints.CheckpointError, "40-character"):
+            checkpoints.resolve_vlm({"vlm": {**self.PINNED, "revision": "main"}})
+
+    def test_pin_replaces_the_repo_id_with_the_local_snapshot(self):
+        config = type("Config", (), {"vlm_model_name": self.PINNED["repo_id"]})()
+        checkpoints.pin_vlm(config, self.PINNED["repo_id"], "/cache/snapshots/" + REV_A)
+        self.assertEqual(config.vlm_model_name, "/cache/snapshots/" + REV_A)
+
+    def test_pin_refuses_a_checkpoint_trained_on_another_backbone(self):
+        config = type("Config", (), {"vlm_model_name": "HuggingFaceTB/SmolVLM2-2.2B-Instruct"})()
+        with self.assertRaisesRegex(checkpoints.CheckpointError, "pinned VLM"):
+            checkpoints.pin_vlm(config, self.PINNED["repo_id"], "/cache/x")
+        self.assertEqual(config.vlm_model_name, "HuggingFaceTB/SmolVLM2-2.2B-Instruct")
+
+
 class Materialize(unittest.TestCase):
     """Downloads go through the worker Python; a fake one stands in for it."""
 
@@ -172,6 +194,11 @@ class ShippedConfigs(unittest.TestCase):
                 self.assertIn("Refusing to guess", str(exc))
             else:
                 self.assertNotIn("SmolVLA_sim_", source.describe())
+
+    def test_both_configs_pin_the_same_vlm(self):
+        pins = [checkpoints.resolve_vlm(self.load(f)) for f in ("deploy_policy.yml", "test_configs/official_baseline.yml")]
+        self.assertEqual(pins[0], pins[1])
+        self.assertEqual(pins[0].repo_id, "HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
 
     def test_official_baseline_config_covers_every_task_at_a_full_revision(self):
         config = self.load("test_configs/official_baseline.yml")
