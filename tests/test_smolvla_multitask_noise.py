@@ -29,6 +29,16 @@ def load(name, filename, directory=POLICY_DIR):
 
 noise_seed = load("smolvla_multitask_noise_seed", "noise_seed.py")
 
+
+def call_action_digest(actions):
+    """The adapter's per-call action digest, recomputed from saved actions."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for action in actions:
+        h.update(action.tobytes())
+    return h.hexdigest()[:16]
+
 try:
     import numpy as np
     import torch
@@ -112,6 +122,7 @@ class AdapterSeeding(unittest.TestCase):
         client.rescale_gripper, client.gripper_indices, client.gripper_source_range = False, (6, 13), (0.0, 1.0)
         client.check_success_each_step = False
         client.debug_actions, client._debug_chunks_printed, client.debug_action_log_path = False, 0, None
+        client.dump_obs_dir, client.dump_obs_calls, client._episodes_started = None, 5, 0
         client.sent = []
         state = {"noise": None}
 
@@ -176,6 +187,21 @@ class AdapterSeeding(unittest.TestCase):
     def test_missing_episode_seed_is_an_error_not_unseeded_noise(self):
         with self.assertRaisesRegex(RuntimeError, "no episode seed"):
             self.episode(self.client(), None)
+
+    def test_dump_saves_the_first_calls_of_each_episode(self):
+        import tempfile
+
+        client = self.client()
+        with tempfile.TemporaryDirectory() as tmp:
+            client.dump_obs_dir, client.dump_obs_calls = Path(tmp), 1
+            self.episode(client, 398764591)
+            meta = self.episode(client, 924231285)
+            self.assertEqual(sorted(p.name for p in Path(tmp).iterdir()),
+                             ["episode000_call000.npz", "episode001_call000.npz"])
+            saved = np.load(Path(tmp) / "episode001_call000.npz")
+            self.assertEqual(int(saved["env_seed"]), 924231285)
+            self.assertEqual(saved["noise_digests"].tolist(), meta["noise_digests"][:1])
+            self.assertEqual(call_action_digest(saved["actions"]), meta["calls"][0]["actions"])
 
     def test_off_sends_no_seed_and_records_none(self):
         client = self.client(base=None)

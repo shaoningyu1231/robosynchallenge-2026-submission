@@ -204,6 +204,12 @@ class SmolVLAWorkerClient:
         self.debug_action_chunks = int(usr_args.get("smolvla_debug_action_chunks", 1))
         self.debug_action_log_path = usr_args.get("smolvla_debug_action_log_path")
         self._debug_chunks_printed = 0
+        # Debugging reproducibility: save what the first calls of each episode
+        # sent and got back, as episodeNNN_callNNN.npz (off by default).
+        dump_dir = usr_args.get("smolvla_dump_obs_dir")
+        self.dump_obs_dir = None if dump_dir in (None, "", "None", "null") else Path(dump_dir)
+        self.dump_obs_calls = int(usr_args.get("smolvla_dump_obs_calls", 5))
+        self._episodes_started = 0
         self.cuda_visible_devices = str(
             usr_args.get("smolvla_cuda_visible_devices", usr_args.get("gpu_id", 0))
         )
@@ -339,6 +345,16 @@ class SmolVLAWorkerClient:
         record["noise_digests"].extend(response.get("noise_digests", []))
         for action in actions:
             record["actions"].update(action.tobytes())
+        if self.dump_obs_dir is not None and len(record["calls"]) < self.dump_obs_calls:
+            self.dump_obs_dir.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(
+                self.dump_obs_dir / f"episode{self._episodes_started - 1:03d}_call{len(record['calls']):03d}.npz",
+                **obs,
+                task=np.asarray(task),
+                actions=np.asarray(actions, dtype=np.float32),
+                noise_digests=np.asarray(response.get("noise_digests", [])),
+                env_seed=np.asarray(-1 if record["env_seed"] is None else record["env_seed"]),
+            )
         # Per call, so two runs that drift apart show where: in the observation
         # (the simulator), or in the actions given the same observation and noise.
         record["calls"].append({
@@ -384,6 +400,7 @@ class SmolVLAWorkerClient:
         self.episode_timing = _empty_timing()
 
     def reset(self) -> None:
+        self._episodes_started += 1
         self._debug_chunks_printed = 0
         self.episode_timing = _empty_timing()
         self.episode_record = _empty_episode_record()
