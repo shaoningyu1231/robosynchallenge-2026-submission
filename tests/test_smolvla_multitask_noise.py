@@ -4,7 +4,7 @@ The seed rule needs only the standard library; the worker generator and the
 adapter bookkeeping need torch and numpy (no simulator, no LeRobot: the worker
 is replaced by a fake that draws from the real EpisodeNoise).
 
-    python -m unittest tests.test_smolvla_multitask_noise -v
+    python -m unittest discover -s tests -p test_smolvla_multitask_noise.py -v
 """
 
 import importlib.util
@@ -17,8 +17,10 @@ POLICY_DIR = REPO_ROOT / "policy" / "smolvla_multitask"
 sys.path.insert(0, str(REPO_ROOT))
 
 
-def load(name, filename):
-    spec = importlib.util.spec_from_file_location(name, POLICY_DIR / filename)
+def load(name, filename, directory=POLICY_DIR):
+    # By path: in the simulator's venv `import tests` finds an unrelated package
+    # (draccus ships one), and `tests.<module>` another checkout's file.
+    spec = importlib.util.spec_from_file_location(name, directory / filename)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
@@ -92,9 +94,11 @@ class AdapterSeeding(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         from policy.smolvla_multitask import deploy_policy
-        from tests import test_smolvla_adapter as fakes
 
+        fakes = load("smolvla_adapter_fakes", "test_smolvla_adapter.py", REPO_ROOT / "tests")
         cls.dp, cls.fakes = deploy_policy, fakes
+        if Path(deploy_policy.__file__).resolve().parents[2] != REPO_ROOT:
+            raise RuntimeError(f"deploy_policy imported from another checkout: {deploy_policy.__file__}")
         cls.worker = load("smolvla_multitask_worker_for_adapter", "smolvla_worker.py")
 
     def client(self, base=0):
