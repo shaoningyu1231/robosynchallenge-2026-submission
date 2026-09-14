@@ -155,6 +155,9 @@ class AdapterSeeding(unittest.TestCase):
         self.assertEqual(meta["noise_seed"], noise_seed.policy_noise_seed(0, 398764591))
         self.assertEqual(meta["forwards"], 2)
         self.assertEqual(len(set(meta["noise_digests"])), 2)
+        self.assertEqual([call["forwards"] for call in meta["calls"]], [1, 1])
+        self.assertEqual(len({call["obs"] for call in meta["calls"]}), 1, "the fake env sends one observation")
+        self.assertEqual(len({call["actions"] for call in meta["calls"]}), 2)
 
     def test_same_scene_reproduces_and_another_scene_does_not(self):
         client = self.client()

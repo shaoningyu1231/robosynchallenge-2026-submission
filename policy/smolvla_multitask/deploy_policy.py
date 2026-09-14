@@ -142,7 +142,18 @@ def _empty_timing() -> dict:
 def _empty_episode_record() -> dict:
     # Kept apart from episode_timing, which log_episode_timing clears when the
     # episode ends -- before eval_policy.py asks for this record.
-    return {"env_seed": None, "noise_seed": None, "forwards": 0, "noise_digests": [], "actions": hashlib.sha256()}
+    return {
+        "env_seed": None, "noise_seed": None, "forwards": 0, "noise_digests": [],
+        "calls": [], "actions": hashlib.sha256(),
+    }
+
+
+def _digest(arrays) -> str:
+    """First 16 hex digits of SHA-256 over the arrays' raw bytes, in order."""
+    h = hashlib.sha256()
+    for array in arrays:
+        h.update(np.ascontiguousarray(array).tobytes())
+    return h.hexdigest()[:16]
 
 
 def _episode_env_seed(env) -> int:
@@ -328,6 +339,13 @@ class SmolVLAWorkerClient:
         record["noise_digests"].extend(response.get("noise_digests", []))
         for action in actions:
             record["actions"].update(action.tobytes())
+        # Per call, so two runs that drift apart show where: in the observation
+        # (the simulator), or in the actions given the same observation and noise.
+        record["calls"].append({
+            "obs": _digest(obs[key] for key in sorted(obs)),
+            "actions": _digest(actions),
+            "forwards": int(response.get("forwards", 0)),
+        })
         return actions
 
     def seed_noise(self, env_seed: int) -> None:
@@ -346,6 +364,9 @@ class SmolVLAWorkerClient:
             "noise_digests": list(record["noise_digests"]),
             # Every action the policy returned, in order, as float32 bytes.
             "action_digest": record["actions"].hexdigest()[:16],
+            # One entry per worker call: digests of the encoded observation sent
+            # and of the actions returned, and how many forwards that call ran.
+            "calls": [dict(call) for call in record["calls"]],
         }
 
     def record_call(self, seconds: float) -> None:
