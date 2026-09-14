@@ -298,6 +298,17 @@ class RecordingEnvProxy:
         return bool(value)
 
 
+def seed_global_rngs(seed):
+    """Seed Python's ``random``, NumPy and Torch (CPU and every CUDA device)."""
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+
+
 def prepare_episode_reset(env, seed):
     """Seed every RNG used by task randomizers before a reproducible reset.
 
@@ -307,12 +318,7 @@ def prepare_episode_reset(env, seed):
     Keep this compatibility shim here instead of changing EmbodiChain itself.
     """
     seed = int(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+    seed_global_rngs(seed)
 
     target = getattr(env, "unwrapped", env)
     np_random, actual_seed = gym.utils.seeding.np_random(seed)
@@ -677,7 +683,15 @@ def main():
 
     # Build environment
     env_id = gym_config_dict.get("id")
-    print(f"Creating environment: {env_id}")
+    # Randomizers draw state while the environment is built, not only at reset:
+    # EmbodiChain's visual-material randomizer samples its solid-colour palette
+    # with torch.rand in _build_solid_textures. Unseeded, every evaluation
+    # process got its own palette, and two runs of one seed switched table and
+    # button colours apart at the first interval randomization (step 10).
+    # Per-episode seeding in prepare_episode_reset stays as it is.
+    if seed is not None:
+        seed_global_rngs(seed)
+    print(f"Creating environment: {env_id} (global RNGs seeded with {seed})")
     env, gym_config_dict = make_env_from_configs(config, gym_config_dict, action_config_dict)
     instruction = extract_instruction_from_gym_config(gym_config_dict)
     if instruction:
@@ -926,6 +940,9 @@ def main():
                 "timeout_action_steps": max_env_steps,
                 "seed": seed,
                 "fixed_episode_seed": fixed_episode_seed,
+                # Runs without this key built their environment unseeded
+                # (per-process randomizer state such as the colour palette).
+                "env_creation_seed": seed,
             },
             "inference_timing_scope": (
                 "raw observation preprocessing and transfer through executable action; "
