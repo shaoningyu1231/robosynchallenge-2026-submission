@@ -195,6 +195,11 @@ class ShippedConfigs(unittest.TestCase):
             else:
                 self.assertNotIn("SmolVLA_sim_", source.describe())
 
+    def test_both_configs_seed_the_noise(self):
+        for f in ("deploy_policy.yml", "test_configs/official_baseline.yml"):
+            with self.subTest(config=f):
+                self.assertEqual(self.load(f)["smolvla_noise_seed"], 0)
+
     def test_both_configs_pin_the_same_vlm(self):
         pins = [checkpoints.resolve_vlm(self.load(f)) for f in ("deploy_policy.yml", "test_configs/official_baseline.yml")]
         self.assertEqual(pins[0], pins[1])

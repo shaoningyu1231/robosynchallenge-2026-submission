@@ -868,6 +868,13 @@ def main():
                         if expert_result is not None
                         else None
                     ),
+                    # Optional adapter hook (smolvla_multitask: environment and
+                    # noise seeds, forwards, noise and action digests).
+                    "policy": (
+                        policy_pkg.episode_metadata(model)
+                        if hasattr(policy_pkg, "episode_metadata")
+                        else None
+                    ),
                 }
             )
             episode_average = float(np.mean(inference_times)) if inference_times else 0

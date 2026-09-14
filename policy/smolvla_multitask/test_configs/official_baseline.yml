@@ -79,6 +79,16 @@ vlm:
   repo_id: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
   revision: 7b375e1b73b11138ff12fe22c8f2822d8fe03467
 
+# ------------------------------------------------------------------
+# Flow-matching noise. null: LeRobot samples fresh noise from the global RNG for
+# every action chunk, so the same scene can end differently on a rerun. An
+# integer N: every episode gets its own generator, seeded from N and the
+# episode's environment seed (noise_seed.py) and advanced once per model
+# forward; the metrics record both seeds, the forward count and a digest of
+# each noise block. On for the submission and for every model comparison.
+# ------------------------------------------------------------------
+smolvla_noise_seed: 0
+
 # Optional. If empty, the worker imports the lerobot installed in its Python
 # (policy/smolvla_multitask/setup_lerobot.sh installs it into .venv).
 lerobot_root: ""

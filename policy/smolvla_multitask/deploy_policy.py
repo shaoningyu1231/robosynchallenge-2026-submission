@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import atexit
+import hashlib
 import json
 import os
 import subprocess
@@ -16,6 +17,7 @@ import numpy as np
 import torch
 
 from policy.inference_timing import finish_inference, start_inference
+from policy.smolvla_multitask import noise_seed
 from policy.smolvla_multitask.checkpoints import VLM_REQUIRED_FILES, materialize, resolve_source, resolve_vlm
 
 
@@ -137,6 +139,27 @@ def _empty_timing() -> dict:
     return {"rpc_calls": 0, "forwards": 0, "rpc_s": 0.0, "forward_s": 0.0}
 
 
+def _empty_episode_record() -> dict:
+    # Kept apart from episode_timing, which log_episode_timing clears when the
+    # episode ends -- before eval_policy.py asks for this record.
+    return {"env_seed": None, "noise_seed": None, "forwards": 0, "noise_digests": [], "actions": hashlib.sha256()}
+
+
+def _episode_env_seed(env) -> int:
+    """The environment seed scripts/eval_policy.py reset this episode with.
+
+    prepare_episode_reset stores it on the unwrapped env; RecordingEnvProxy
+    forwards attribute access, so this works with and without video recording.
+    """
+    seed = getattr(getattr(env, "unwrapped", env), "_robosyn_episode_seed", None)
+    if seed is None:
+        raise RuntimeError(
+            "smolvla_noise_seed is set, but the evaluator recorded no episode seed "
+            "(_robosyn_episode_seed); refusing to fall back to unseeded noise"
+        )
+    return int(seed)
+
+
 class SmolVLAWorkerClient:
     def __init__(self, usr_args: dict):
         policy_root = Path(__file__).resolve().parent
@@ -157,6 +180,8 @@ class SmolVLAWorkerClient:
             # The upper bound (chunk_size) is checked by the worker, which knows the model.
             raise ValueError(f"smolvla_replan_steps must be >= 1, got {self.replan_steps}")
         self.episode_timing = _empty_timing()
+        self.noise_base = noise_seed.parse_base(usr_args.get("smolvla_noise_seed"))
+        self.episode_record = _empty_episode_record()
         self.check_success_each_step = bool(
             _resolve_optional_bool(usr_args.get("smolvla_check_success_each_step", False))
         )
@@ -288,6 +313,7 @@ class SmolVLAWorkerClient:
                     "obs_path": obs_path,
                     "n_action_steps": self.replan_steps if self.replan_steps is not None else self.smolvla_steps,
                     "replan": self.replan_steps is not None,
+                    "seeded_noise": self.noise_base is not None,
                 }
             )
         finally:
@@ -296,7 +322,31 @@ class SmolVLAWorkerClient:
 
         self.episode_timing["forwards"] += int(response.get("forwards", 0))
         self.episode_timing["forward_s"] += float(response.get("forward_s", 0.0))
-        return [np.asarray(action, dtype=np.float32) for action in response["actions"]]
+        actions = [np.asarray(action, dtype=np.float32) for action in response["actions"]]
+        record = self.episode_record
+        record["forwards"] += int(response.get("forwards", 0))
+        record["noise_digests"].extend(response.get("noise_digests", []))
+        for action in actions:
+            record["actions"].update(action.tobytes())
+        return actions
+
+    def seed_noise(self, env_seed: int) -> None:
+        """Seed this episode's noise generator in the worker from the environment seed."""
+        seed = noise_seed.policy_noise_seed(self.noise_base, env_seed)
+        self._rpc({"cmd": "seed_noise", "seed": seed})
+        self.episode_record["env_seed"] = int(env_seed)
+        self.episode_record["noise_seed"] = seed
+
+    def episode_metadata(self) -> dict:
+        record = self.episode_record
+        return {
+            "env_seed": record["env_seed"],
+            "noise_seed": record["noise_seed"],
+            "forwards": record["forwards"],
+            "noise_digests": list(record["noise_digests"]),
+            # Every action the policy returned, in order, as float32 bytes.
+            "action_digest": record["actions"].hexdigest()[:16],
+        }
 
     def record_call(self, seconds: float) -> None:
         self.episode_timing["rpc_calls"] += 1
@@ -315,6 +365,7 @@ class SmolVLAWorkerClient:
     def reset(self) -> None:
         self._debug_chunks_printed = 0
         self.episode_timing = _empty_timing()
+        self.episode_record = _empty_episode_record()
         self._rpc({"cmd": "reset"})
 
     def maybe_print_action_debug(self, actions: list[np.ndarray]) -> None:
@@ -392,6 +443,7 @@ def get_model(usr_args):
     # eval_policy.py copies these into evaluation_metrics.json, so the metrics say
     # exactly which weights produced them.
     usr_args["checkpoint_path"] = source.describe()
+    base = noise_seed.parse_base(usr_args.get("smolvla_noise_seed"))
     usr_args["checkpoint_metadata"] = {
         "policy": {
             "origin": source.origin,
@@ -400,11 +452,18 @@ def get_model(usr_args):
             "path": str(checkpoint_dir),
         },
         "vlm": {"repo_id": vlm.repo_id, "revision": vlm.revision, "path": str(vlm_dir)},
+        "policy_noise": None if base is None else {
+            "base_seed": base,
+            "episode_seed": noise_seed.DERIVATION,
+            "per_forward": noise_seed.PER_FORWARD,
+        },
     }
     return SmolVLAWorkerClient(usr_args)
 
 
 def eval(env, model, obs):
+    if model.noise_base is not None and model.episode_record["noise_seed"] is None:
+        model.seed_noise(_episode_env_seed(env))
     instruction = getattr(env, "_current_instruction", None) or "click the bell"
     # One sample per worker call: observation encoding, IPC and the returned
     # actions (a model forward runs only when the worker needs a new chunk).
@@ -443,6 +502,11 @@ def eval(env, model, obs):
 
 def reset_model(model):
     model.reset()
+
+
+def episode_metadata(model):
+    """Per-episode record for evaluation_metrics.json: seeds, forwards, noise and action digests."""
+    return model.episode_metadata()
 
 
 def close_model(model):

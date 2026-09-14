@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
 import sys
 import time
@@ -138,6 +139,28 @@ def _obs_to_tensors(obs: dict[str, np.ndarray]) -> dict[str, "torch.Tensor"]:
     return tensors
 
 
+class EpisodeNoise:
+    """Flow-matching noise for one episode, drawn from the episode's own generator.
+
+    One draw per model forward, never re-seeded mid-episode, so successive action
+    chunks get different noise while a rerun with the same seed gets the same
+    sequence. The generator lives on the CPU so the sequence does not depend on
+    the GPU; the noise is moved to the policy's device afterwards. Shape and
+    dtype match what SmolVLA samples itself (flow_matching.sample_noise).
+    """
+
+    def __init__(self, seed: int):
+        self.seed = int(seed)
+        self.generator = torch.Generator(device="cpu").manual_seed(self.seed)
+        self.draws = 0
+
+    def draw(self, shape, device) -> tuple["torch.Tensor", str]:
+        noise = torch.randn(shape, generator=self.generator, dtype=torch.float32)
+        self.draws += 1
+        digest = hashlib.sha256(noise.numpy().tobytes()).hexdigest()[:16]
+        return noise.to(device), digest
+
+
 def _synchronize(device: str) -> None:
     if str(device).startswith("cuda"):
         torch.cuda.synchronize()
@@ -152,6 +175,8 @@ def main() -> int:
     args = _parse_args()
     with contextlib.redirect_stdout(sys.stderr):
         policy, preprocessor, postprocessor = _load_runtime(args)
+    noise_shape = (1, int(policy.config.chunk_size), int(policy.config.max_action_dim))
+    noise = None   # EpisodeNoise once the adapter seeds the episode; None: LeRobot samples its own
 
     for line in sys.stdin:
         line = line.strip()
@@ -164,7 +189,13 @@ def main() -> int:
         try:
             if cmd == "reset":
                 policy.reset()
+                noise = None
                 _send({"ok": True})
+                continue
+
+            if cmd == "seed_noise":
+                noise = EpisodeNoise(request["seed"])
+                _send({"ok": True, "seed": noise.seed})
                 continue
 
             if cmd != "infer":
@@ -176,18 +207,25 @@ def main() -> int:
                 obs["task"] = task
                 proc_obs = preprocessor(obs)
 
+                if request.get("seeded_noise") and noise is None:
+                    raise RuntimeError("seeded noise was requested but this episode was never seeded")
                 num_actions = int(request.get("n_action_steps", 1))
                 actions = []
                 forwards, forward_s = 0, 0.0
+                noise_digests = []
                 if request.get("replan", False):
                     # Predict a fresh chunk from this observation and return its first
                     # num_actions steps, bypassing the LeRobot action queue.
                     chunk_size = int(policy.config.chunk_size)
                     if not 1 <= num_actions <= chunk_size:
                         raise ValueError(f"replan steps must be in [1, {chunk_size}], got {num_actions}")
+                    chunk_noise = None
+                    if noise is not None:
+                        chunk_noise, digest = noise.draw(noise_shape, args.device)
+                        noise_digests.append(digest)
                     started = time.perf_counter()
                     with torch.no_grad():
-                        chunk = policy.predict_action_chunk(proc_obs)
+                        chunk = policy.predict_action_chunk(proc_obs, noise=chunk_noise)
                     _synchronize(args.device)
                     forwards, forward_s = 1, time.perf_counter() - started
                     for index in range(num_actions):
@@ -197,8 +235,13 @@ def main() -> int:
                     for _ in range(num_actions):
                         # select_action only runs the model when its action queue is empty.
                         runs_forward = policy._check_get_actions_condition()
+                        step_noise = None
+                        if runs_forward and noise is not None:
+                            # select_action only uses noise when it runs the model.
+                            step_noise, digest = noise.draw(noise_shape, args.device)
+                            noise_digests.append(digest)
                         started = time.perf_counter()
-                        action = policy.select_action(proc_obs)
+                        action = policy.select_action(proc_obs, noise=step_noise)
                         if runs_forward:
                             _synchronize(args.device)
                             forwards += 1
@@ -206,7 +249,8 @@ def main() -> int:
                         action = postprocessor(action)
                         actions.append(action.squeeze(0).cpu().numpy().astype(np.float32).tolist())
 
-            _send({"ok": True, "actions": actions, "forwards": forwards, "forward_s": forward_s})
+            _send({"ok": True, "actions": actions, "forwards": forwards, "forward_s": forward_s,
+                   "noise_digests": noise_digests})
         except Exception as exc:  # noqa: BLE001
             _send({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
