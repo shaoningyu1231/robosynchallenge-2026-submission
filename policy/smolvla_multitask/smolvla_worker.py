@@ -177,6 +177,8 @@ def main() -> int:
         policy, preprocessor, postprocessor = _load_runtime(args)
     noise_shape = (1, int(policy.config.chunk_size), int(policy.config.max_action_dim))
     noise = None   # EpisodeNoise once the adapter seeds the episode; None: LeRobot samples its own
+    # Per episode: model forwards so far, and the chunk position of the last action returned.
+    episode_forwards, chunk_position = 0, -1
 
     for line in sys.stdin:
         line = line.strip()
@@ -190,12 +192,17 @@ def main() -> int:
             if cmd == "reset":
                 policy.reset()
                 noise = None
+                episode_forwards, chunk_position = 0, -1
                 _send({"ok": True})
                 continue
 
             if cmd == "seed_noise":
                 noise = EpisodeNoise(request["seed"])
-                _send({"ok": True, "seed": noise.seed})
+                # Replaying forward k of an episode offline needs noise block k:
+                # draw and discard the k blocks before it.
+                for _ in range(int(request.get("skip", 0))):
+                    noise.draw(noise_shape, "cpu")
+                _send({"ok": True, "seed": noise.seed, "skipped": noise.draws})
                 continue
 
             if cmd != "infer":
@@ -213,6 +220,7 @@ def main() -> int:
                 actions = []
                 forwards, forward_s = 0, 0.0
                 noise_digests = []
+                forward_indices, chunk_positions = [], []
                 if request.get("replan", False):
                     # Predict a fresh chunk from this observation and return its first
                     # num_actions steps, bypassing the LeRobot action queue.
@@ -228,9 +236,13 @@ def main() -> int:
                         chunk = policy.predict_action_chunk(proc_obs, noise=chunk_noise)
                     _synchronize(args.device)
                     forwards, forward_s = 1, time.perf_counter() - started
+                    forward_indices.append(episode_forwards)
+                    episode_forwards += 1
                     for index in range(num_actions):
                         action = postprocessor(chunk[:, index])
                         actions.append(action.squeeze(0).cpu().numpy().astype(np.float32).tolist())
+                        chunk_positions.append(index)
+                    chunk_position = num_actions - 1
                 else:
                     for _ in range(num_actions):
                         # select_action only runs the model when its action queue is empty.
@@ -246,11 +258,19 @@ def main() -> int:
                             _synchronize(args.device)
                             forwards += 1
                             forward_s += time.perf_counter() - started
+                            forward_indices.append(episode_forwards)
+                            episode_forwards += 1
+                            chunk_position = -1
+                        chunk_position += 1
+                        chunk_positions.append(chunk_position)
                         action = postprocessor(action)
                         actions.append(action.squeeze(0).cpu().numpy().astype(np.float32).tolist())
 
+            # forward_indices: the episode-wide index of each forward this call ran;
+            # chunk_positions: where in its chunk each returned action sits.
             _send({"ok": True, "actions": actions, "forwards": forwards, "forward_s": forward_s,
-                   "noise_digests": noise_digests})
+                   "noise_digests": noise_digests, "forward_indices": forward_indices,
+                   "chunk_positions": chunk_positions})
         except Exception as exc:  # noqa: BLE001
             _send({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 

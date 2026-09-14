@@ -354,13 +354,19 @@ class SmolVLAWorkerClient:
                 actions=np.asarray(actions, dtype=np.float32),
                 noise_digests=np.asarray(response.get("noise_digests", [])),
                 env_seed=np.asarray(-1 if record["env_seed"] is None else record["env_seed"]),
+                forward_indices=np.asarray(response.get("forward_indices", []), dtype=np.int64),
+                chunk_positions=np.asarray(response.get("chunk_positions", []), dtype=np.int64),
             )
         # Per call, so two runs that drift apart show where: in the observation
         # (the simulator), or in the actions given the same observation and noise.
+        # Only calls with a forward (forward_indices non-empty) computed actions from
+        # this call's observation; the others popped the queue of an earlier chunk.
         record["calls"].append({
             "obs": _digest(obs[key] for key in sorted(obs)),
             "actions": _digest(actions),
             "forwards": int(response.get("forwards", 0)),
+            "forward_indices": list(response.get("forward_indices", [])),
+            "chunk_positions": list(response.get("chunk_positions", [])),
         })
         return actions
 
@@ -381,7 +387,8 @@ class SmolVLAWorkerClient:
             # Every action the policy returned, in order, as float32 bytes.
             "action_digest": record["actions"].hexdigest()[:16],
             # One entry per worker call: digests of the encoded observation sent
-            # and of the actions returned, and how many forwards that call ran.
+            # and of the actions returned, the forwards that call ran (count and
+            # episode-wide indices) and each returned action's position in its chunk.
             "calls": [dict(call) for call in record["calls"]],
         }
 

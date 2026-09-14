@@ -89,6 +89,16 @@ class WorkerNoise(unittest.TestCase):
         _, d2 = self.worker.EpisodeNoise(8).draw(shape, "cpu")
         self.assertNotEqual(d1, d2)
 
+    def test_skipping_k_blocks_yields_block_k(self):
+        # What seed_noise(skip=k) does before an offline replay of forward k.
+        shape = (1, 50, 32)
+        online = self.worker.EpisodeNoise(7)
+        digests = [online.draw(shape, "cpu")[1] for _ in range(3)]
+        replay = self.worker.EpisodeNoise(7)
+        for _ in range(2):
+            replay.draw(shape, "cpu")
+        self.assertEqual(replay.draw(shape, "cpu")[1], digests[2])
+
     def test_does_not_touch_the_global_rng(self):
         torch.manual_seed(123)
         expected = torch.rand(3)
@@ -129,11 +139,12 @@ class AdapterSeeding(unittest.TestCase):
         def fake_rpc(payload):
             client.sent.append(payload["cmd"])
             if payload["cmd"] == "reset":
-                state["noise"] = None
+                state["noise"], state["forwards"] = None, 0
                 return {"ok": True}
             if payload["cmd"] == "seed_noise":
                 state["noise"] = worker.EpisodeNoise(payload["seed"])
                 return {"ok": True}
+            state["forwards"] += 1
             assert payload["seeded_noise"] == (base is not None)
             if payload["seeded_noise"] and state["noise"] is None:
                 raise RuntimeError("never seeded")
@@ -144,7 +155,8 @@ class AdapterSeeding(unittest.TestCase):
             else:
                 noise, digests = torch.randn(1, 50, 32), []
             actions = noise[0, :10, :14].numpy().tolist()
-            return {"ok": True, "actions": actions, "forwards": 1, "forward_s": 0.0, "noise_digests": digests}
+            return {"ok": True, "actions": actions, "forwards": 1, "forward_s": 0.0, "noise_digests": digests,
+                    "forward_indices": [state["forwards"] - 1], "chunk_positions": list(range(10))}
 
         client._rpc = fake_rpc
         return client
@@ -167,6 +179,8 @@ class AdapterSeeding(unittest.TestCase):
         self.assertEqual(meta["forwards"], 2)
         self.assertEqual(len(set(meta["noise_digests"])), 2)
         self.assertEqual([call["forwards"] for call in meta["calls"]], [1, 1])
+        self.assertEqual([call["forward_indices"] for call in meta["calls"]], [[0], [1]])
+        self.assertEqual(meta["calls"][1]["chunk_positions"], list(range(10)))
         self.assertEqual(len({call["obs"] for call in meta["calls"]}), 1, "the fake env sends one observation")
         self.assertEqual(len({call["actions"] for call in meta["calls"]}), 2)
 
@@ -200,6 +214,7 @@ class AdapterSeeding(unittest.TestCase):
                              ["episode000_call000.npz", "episode001_call000.npz"])
             saved = np.load(Path(tmp) / "episode001_call000.npz")
             self.assertEqual(int(saved["env_seed"]), 924231285)
+            self.assertEqual((saved["forward_indices"].tolist(), saved["chunk_positions"].tolist()), ([0], list(range(10))))
             self.assertEqual(saved["noise_digests"].tolist(), meta["noise_digests"][:1])
             self.assertEqual(call_action_digest(saved["actions"]), meta["calls"][0]["actions"])
 
