@@ -221,6 +221,10 @@ def main() -> int:
                 forwards, forward_s = 0, 0.0
                 noise_digests = []
                 forward_indices, chunk_positions = [], []
+                # Diagnostics only: the model's output before the postprocessor
+                # (normalized with this checkpoint's own statistics).
+                return_normalized = bool(request.get("return_normalized", False))
+                normalized_actions = []
                 if request.get("replan", False):
                     # Predict a fresh chunk from this observation and return its first
                     # num_actions steps, bypassing the LeRobot action queue.
@@ -239,6 +243,8 @@ def main() -> int:
                     forward_indices.append(episode_forwards)
                     episode_forwards += 1
                     for index in range(num_actions):
+                        if return_normalized:
+                            normalized_actions.append(chunk[0, index].cpu().numpy().astype(np.float32).tolist())
                         action = postprocessor(chunk[:, index])
                         actions.append(action.squeeze(0).cpu().numpy().astype(np.float32).tolist())
                         chunk_positions.append(index)
@@ -263,14 +269,19 @@ def main() -> int:
                             chunk_position = -1
                         chunk_position += 1
                         chunk_positions.append(chunk_position)
+                        if return_normalized:
+                            normalized_actions.append(action.squeeze(0).cpu().numpy().astype(np.float32).tolist())
                         action = postprocessor(action)
                         actions.append(action.squeeze(0).cpu().numpy().astype(np.float32).tolist())
 
             # forward_indices: the episode-wide index of each forward this call ran;
             # chunk_positions: where in its chunk each returned action sits.
-            _send({"ok": True, "actions": actions, "forwards": forwards, "forward_s": forward_s,
-                   "noise_digests": noise_digests, "forward_indices": forward_indices,
-                   "chunk_positions": chunk_positions})
+            response = {"ok": True, "actions": actions, "forwards": forwards, "forward_s": forward_s,
+                        "noise_digests": noise_digests, "forward_indices": forward_indices,
+                        "chunk_positions": chunk_positions}
+            if return_normalized:
+                response["normalized_actions"] = normalized_actions
+            _send(response)
         except Exception as exc:  # noqa: BLE001
             _send({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
 
