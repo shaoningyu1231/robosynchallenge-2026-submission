@@ -20,6 +20,11 @@ filter_dataset_saving: true
 eval_video_log: false
 eval_video_obs_key: cam_high
 eval_expert_check: true
+# Our own comparison protocol, not the organisers' evaluation: a JSON list of
+# episode seeds frozen once by tools/select_episode_seeds.py. When set, those
+# seeds are used in order and the expert feasibility filter is turned off (it is
+# not reproducible for every task). null keeps the organisers' protocol.
+eval_episode_seeds: null
 
 # ------------------------------------------------------------------
 # Which checkpoint each task is evaluated with, in this order

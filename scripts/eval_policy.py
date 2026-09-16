@@ -11,6 +11,7 @@ import argparse
 import importlib
 import json
 import platform
+import hashlib
 import random
 import subprocess
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
@@ -307,6 +308,41 @@ def seed_global_rngs(seed):
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
+
+
+def load_frozen_episode_seeds(config):
+    """Episode seeds frozen by an earlier selection run (fixed-scene pairing).
+
+    eval_episode_seeds points at the JSON tools/select_episode_seeds.py writes:
+    {"task", "setting", "base_seed", "accepted": [seed, ...], ...}. The seeds are
+    then used in order, one per episode, and the expert feasibility filter is
+    turned off: it is not reproducible for every task (item_assembly and
+    sample_loading accepted different seeds in two runs on 2026-09-15), which is
+    exactly why the list is frozen once and reused. This is our own comparison
+    protocol, not the organisers' default evaluation.
+    """
+    path = config.get("eval_episode_seeds")
+    if path in (None, "", "None", "null"):
+        return None
+    payload = json.loads(Path(path).read_text())
+    seeds = [int(seed) for seed in payload["accepted"]]
+    for key in ("task", "setting"):
+        if payload.get(key) != config.get({"task": "task_name", "setting": "setting"}[key]):
+            raise ValueError(
+                f"{path}: seeds were selected for {key} {payload.get(key)!r}, "
+                f"not {config.get({'task': 'task_name', 'setting': 'setting'}[key])!r}"
+            )
+    max_episodes = int(config.get("max_episodes"))
+    if len(seeds) < max_episodes:
+        raise ValueError(f"{path}: {len(seeds)} seeds for {max_episodes} episodes")
+    return {
+        "kind": "frozen_list",
+        "path": str(path),
+        "seeds": seeds[:max_episodes],
+        "file_sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+        "used_sha256": hashlib.sha256(",".join(str(s) for s in seeds[:max_episodes]).encode()).hexdigest(),
+        "selected_by": payload.get("selected_by"),
+    }
 
 
 def prepare_episode_reset(env, seed):
@@ -659,6 +695,15 @@ def main():
     fixed_episode_seed = config.get("eval_fixed_episode_seed")
     headless = config.get("headless")
     expert_check = bool(config.get("eval_expert_check", True))
+    frozen_seeds = load_frozen_episode_seeds(config)
+    if frozen_seeds is not None:
+        if fixed_episode_seed is not None:
+            raise ValueError("eval_episode_seeds and eval_fixed_episode_seed cannot both be set")
+        if expert_check:
+            # The filter would re-run on every frozen seed and, when a plan now
+            # fails, abort the run; the point of freezing is to skip it.
+            print("eval_episode_seeds is set: the expert feasibility filter is off for this run")
+            expert_check = False
     if expert_check:
         max_seed_attempts_per_episode = int(
             config.get("eval_max_seed_attempts_per_episodes", 100)
@@ -764,11 +809,12 @@ def main():
                     "expert/action space."
                 )
 
-            ep_seed = (
-                int(fixed_episode_seed)
-                if fixed_episode_seed is not None
-                else int(rng.randint(0, 2**31 - 1))
-            )
+            if frozen_seeds is not None:
+                ep_seed = int(frozen_seeds["seeds"][episode])
+            elif fixed_episode_seed is not None:
+                ep_seed = int(fixed_episode_seed)
+            else:
+                ep_seed = int(rng.randint(0, 2**31 - 1))
             candidate_seed_attempts += 1
             current_episode_seed_attempts += 1
             candidate_index = candidate_seed_attempts - 1
@@ -943,6 +989,13 @@ def main():
                 # Runs without this key built their environment unseeded
                 # (per-process randomizer state such as the colour palette).
                 "env_creation_seed": seed,
+                # None for the organisers' default protocol (candidates drawn
+                # here and filtered by the expert); set when the scenes come
+                # from a frozen list instead.
+                "episode_seed_source": (
+                    None if frozen_seeds is None
+                    else {k: v for k, v in frozen_seeds.items() if k != "seeds"}
+                ),
             },
             "inference_timing_scope": (
                 "raw observation preprocessing and transfer through executable action; "
