@@ -326,12 +326,24 @@ def load_frozen_episode_seeds(config):
         return None
     payload = json.loads(Path(path).read_text())
     seeds = [int(seed) for seed in payload["accepted"]]
-    for key in ("task", "setting"):
-        if payload.get(key) != config.get({"task": "task_name", "setting": "setting"}[key]):
+    for key, config_key in (("task", "task_name"), ("setting", "setting")):
+        if payload.get(key) != config.get(config_key):
             raise ValueError(
                 f"{path}: seeds were selected for {key} {payload.get(key)!r}, "
-                f"not {config.get({'task': 'task_name', 'setting': 'setting'}[key])!r}"
+                f"not {config.get(config_key)!r}"
             )
+    if int(payload.get("base_seed", -1)) != int(config.get("seed")):
+        raise ValueError(
+            f"{path}: seeds were selected from base seed {payload.get('base_seed')!r}, "
+            f"this run's seed is {config.get('seed')!r}"
+        )
+    detail = payload.get("accepted_detail")
+    if detail is not None and [int(entry["seed"]) for entry in detail] != seeds:
+        raise ValueError(f"{path}: accepted_detail does not match accepted")
+    if any(not 0 <= seed < 2**31 - 1 for seed in seeds):
+        raise ValueError(f"{path}: a seed is outside the evaluator's range [0, 2**31 - 1)")
+    if len(set(seeds)) != len(seeds):
+        raise ValueError(f"{path}: the list repeats a seed")
     max_episodes = int(config.get("max_episodes"))
     if len(seeds) < max_episodes:
         raise ValueError(f"{path}: {len(seeds)} seeds for {max_episodes} episodes")
