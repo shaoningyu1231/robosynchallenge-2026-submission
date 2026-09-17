@@ -30,8 +30,11 @@ assert Path(task_norm.__file__).resolve() == _MODULE, "loaded another checkout's
 DIM = 14
 
 
-def block(mean, std, constant=()):
-    mask = [i in constant for i in range(DIM)]
+def block(mean, std, constant=None):
+    # By default the mask is what the threshold says, which is what the loader
+    # now insists on; `constant` overrides it to build inconsistent documents.
+    mask = ([i in constant for i in range(DIM)] if constant is not None
+            else [bool(s <= 1e-06) for s in std])
     return {
         "observation.state": {"mean": list(mean), "std": list(std), "constant_mask": mask},
         "action": {"mean": list(mean), "std": list(std), "constant_mask": mask},
@@ -55,6 +58,7 @@ def document(tasks, gripper=None, **overrides):
         "transform": "task_conditioned_mean_std",
         "transform_version": "q1c-1",
         "features": list(task_norm.FEATURES),
+        "constant_std_threshold": 1e-06,
         "gripper": GRIPPER if gripper is None else gripper,
         "tasks": tasks,
     }
@@ -141,7 +145,8 @@ class Transform(unittest.TestCase):
         state[6] = 1.0131                                   # measured on the real env
         self.assertIsNone(self.norm.state_range_problem(state))
         state[6] = 3.5
-        self.assertIn("outside the training range", self.norm.state_range_problem(state))
+        # The check happens before any conversion, so it speaks of the env range.
+        self.assertIn("outside the environment range", self.norm.state_range_problem(state))
 
 
 class Validation(unittest.TestCase):
@@ -207,13 +212,123 @@ class Validation(unittest.TestCase):
     def test_zero_std_without_a_constant_mask_fails(self):
         std = np.ones(DIM)
         std[2] = 0.0
-        with self.assertRaises(task_norm.TaskNormalizationError):
-            task_norm.TaskNorm(self.load(document({"t": block(np.zeros(DIM), std)})), "t")
+        with self.assertRaises(task_norm.TaskNormalizationError) as caught:
+            # constant=() forces an all-false mask, contradicting the zero std.
+            task_norm.TaskNorm(self.load(document({"t": block(np.zeros(DIM), std, constant=())})), "t")
+        self.assertIn("constant_mask", str(caught.exception))
+
+    def test_a_mask_that_marks_a_moving_dimension_fails(self):
+        std = np.ones(DIM)
+        with self.assertRaises(task_norm.TaskNormalizationError) as caught:
+            task_norm.TaskNorm(self.load(document({"t": block(np.zeros(DIM), std, constant=(4,))})), "t")
+        self.assertIn("disagrees with std", str(caught.exception))
+
+    def test_a_mask_of_zeros_and_ones_is_not_a_mask(self):
+        tasks = {"t": block(np.zeros(DIM), np.ones(DIM))}
+        tasks["t"]["action"]["constant_mask"] = [0] * DIM
+        with self.assertRaises(task_norm.TaskNormalizationError) as caught:
+            task_norm.TaskNorm(self.load(document(tasks)), "t")
+        self.assertIn("true/false", str(caught.exception))
+
+    def test_the_transform_and_its_version_must_be_supported(self):
+        for field, value in (("transform", "minmax"), ("transform_version", "q1c-99"),
+                             ("features", ["action"]), ("constant_std_threshold", "small")):
+            doc = document(self.tasks)
+            doc["payload"][field] = value
+            doc["content_sha256"] = hashlib.sha256(task_norm.canonical(doc["payload"])).hexdigest()
+            with self.assertRaises(task_norm.TaskNormalizationError, msg=f"{field}={value!r}"):
+                self.load(doc)
+
+    def test_gripper_dimensions_must_be_unique_and_in_range(self):
+        for dims in ([6, 6], [6, 14], [-1, 6], [6, True]):
+            gripper = json.loads(json.dumps(GRIPPER))
+            gripper["dims"] = dims
+            with self.assertRaises(task_norm.TaskNormalizationError, msg=str(dims)):
+                task_norm.TaskNorm(self.load(document(self.tasks, gripper=gripper)), "table_rearrangement")
+
+    def test_ranges_must_be_finite_and_non_degenerate(self):
+        for value in ([0.0, 0.0], [1.0, 0.0], [0.0, float("inf")]):
+            gripper = json.loads(json.dumps(GRIPPER))
+            gripper["action"]["env_range"] = value
+            payload_json = json.dumps(gripper)          # inf would not serialize canonically
+            if "Infinity" in payload_json:
+                with self.assertRaises((task_norm.TaskNormalizationError, ValueError)):
+                    task_norm.TaskNorm(self.load(document(self.tasks, gripper=gripper)), "table_rearrangement")
+                continue
+            with self.assertRaises(task_norm.TaskNormalizationError, msg=str(value)):
+                task_norm.TaskNorm(self.load(document(self.tasks, gripper=gripper)), "table_rearrangement")
+
+    def test_tolerance_must_be_a_finite_non_negative_number(self):
+        for value in (-0.1, "wide", True):
+            gripper = json.loads(json.dumps(GRIPPER))
+            gripper["sanity_tolerance"] = value
+            with self.assertRaises(task_norm.TaskNormalizationError, msg=repr(value)):
+                task_norm.TaskNorm(self.load(document(self.tasks, gripper=gripper)), "table_rearrangement")
 
     def test_gripper_units_must_be_described_for_both_sides(self):
-        gripper = {"dims": [6, 13], "action": GRIPPER["action"]}
+        gripper = {"dims": [6, 13], "sanity_tolerance": 0.05, "action": GRIPPER["action"]}
         with self.assertRaises(task_norm.TaskNormalizationError):
             task_norm.TaskNorm(self.load(document(self.tasks, gripper=gripper)), "table_rearrangement")
+
+    def test_nothing_about_the_gripper_is_defaulted(self):
+        # Every field, removed one at a time, must stop the run: a default here
+        # would let the adapter assume a unit.
+        for path in (("dims",), ("sanity_tolerance",), ("state", "env_units"),
+                     ("state", "training_range"), ("action", "env_range"),
+                     ("action", "training_units")):
+            gripper = json.loads(json.dumps(GRIPPER))
+            target = gripper
+            for key in path[:-1]:
+                target = target[key]
+            del target[path[-1]]
+            with self.assertRaises(task_norm.TaskNormalizationError, msg=f"{path} was defaulted"):
+                task_norm.TaskNorm(self.load(document(self.tasks, gripper=gripper)), "table_rearrangement")
+        with self.assertRaises(task_norm.TaskNormalizationError):
+            task_norm.TaskNorm(self.load(document(self.tasks, gripper={})), "table_rearrangement")
+
+
+class StateUnits(unittest.TestCase):
+    """What happens if a task turns out to report the gripper in metres."""
+
+    def setUp(self):
+        self.mean = np.zeros(DIM)
+        self.std = np.ones(DIM)
+        self.metres = json.loads(json.dumps(GRIPPER))
+        self.metres["state"] = {"env_units": "meter", "training_units": "ratio_0_1",
+                                "env_range": [0.0, 0.05], "training_range": [0.0, 1.0]}
+
+    def norm(self, gripper):
+        return task_norm.TaskNorm(document({"t": block(self.mean, self.std)}, gripper=gripper), "t")
+
+    def test_matching_units_pass_through_untouched(self):
+        norm = self.norm(GRIPPER)
+        state = np.linspace(0, 1, DIM)
+        np.testing.assert_array_equal(norm.state_in_training_units(state), state)
+
+    def test_metre_state_is_converted_by_the_declared_ranges(self):
+        norm = self.norm(self.metres)
+        state = np.zeros(DIM)
+        state[6] = 0.025          # half open, in metres
+        state[13] = 0.05          # fully open
+        converted = norm.state_in_training_units(state)
+        self.assertAlmostEqual(converted[6], 0.5)
+        self.assertAlmostEqual(converted[13], 1.0)
+        # Only the gripper dimensions move.
+        self.assertTrue(np.array_equal(np.delete(converted, [6, 13]), np.delete(state, [6, 13])))
+
+    def test_the_range_check_uses_the_environment_unit(self):
+        norm = self.norm(self.metres)
+        state = np.zeros(DIM)
+        state[6] = 0.05                                  # in range for metres
+        self.assertIsNone(norm.state_range_problem(state))
+        state[6] = 0.9                                   # would be fine as a ratio, not as metres
+        self.assertIn("outside the environment range", norm.state_range_problem(state))
+
+    def test_a_degenerate_range_cannot_be_converted(self):
+        broken = json.loads(json.dumps(self.metres))
+        broken["state"]["env_range"] = [0.05, 0.05]
+        with self.assertRaises(task_norm.TaskNormalizationError):
+            self.norm(broken).state_in_training_units(np.zeros(DIM))
 
 
 class Mode(unittest.TestCase):

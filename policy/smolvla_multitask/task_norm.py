@@ -29,6 +29,10 @@ import numpy as np
 
 FEATURES = ("observation.state", "action")
 DIM = 14
+# What this adapter knows how to undo. A checkpoint standardized some other way
+# must not be run through this one just because the file parses.
+SUPPORTED_TRANSFORMS = frozenset({"task_conditioned_mean_std"})
+SUPPORTED_TRANSFORM_VERSIONS = frozenset({"q1c-1"})
 
 
 class TaskNormalizationError(RuntimeError):
@@ -103,10 +107,69 @@ def load_document(checkpoint_dir: Path) -> dict:
     for slug, block in tasks.items():
         if _digest(block) != digests[slug]:
             raise TaskNormalizationError(f"{path}: task_sha256 does not match the block for {slug}")
-    if payload.get("features") and list(payload["features"]) != list(FEATURES):
+    if list(payload.get("features") or []) != list(FEATURES):
         raise TaskNormalizationError(
-            f"{path}: statistics cover {payload['features']}, this adapter transforms {list(FEATURES)}")
+            f"{path}: statistics cover {payload.get('features')!r}, this adapter transforms "
+            f"{list(FEATURES)}")
+    if payload.get("transform") not in SUPPORTED_TRANSFORMS:
+        raise TaskNormalizationError(
+            f"{path}: transform {payload.get('transform')!r} is not one this adapter implements "
+            f"({sorted(SUPPORTED_TRANSFORMS)})")
+    if payload.get("transform_version") not in SUPPORTED_TRANSFORM_VERSIONS:
+        raise TaskNormalizationError(
+            f"{path}: transform_version {payload.get('transform_version')!r} is not supported "
+            f"({sorted(SUPPORTED_TRANSFORM_VERSIONS)})")
+    threshold = payload.get("constant_std_threshold")
+    if not isinstance(threshold, (int, float)) or not np.isfinite(threshold) or threshold < 0:
+        raise TaskNormalizationError(
+            f"{path}: constant_std_threshold {threshold!r} is not a non-negative number")
     return document
+
+
+def _checked_gripper(gripper) -> dict:
+    """The gripper metadata, with nothing defaulted.
+
+    A default here is the failure mode this whole file exists to prevent: the
+    adapter would silently assume a unit, and wrong units produce motion that
+    looks reasonable and is scaled wrong. If the checkpoint does not say, the
+    run stops.
+    """
+    if not isinstance(gripper, dict):
+        raise TaskNormalizationError("the statistics carry no gripper metadata")
+    dims = gripper.get("dims")
+    if (not isinstance(dims, list) or not dims
+            or not all(isinstance(d, int) and not isinstance(d, bool) for d in dims)):
+        raise TaskNormalizationError("gripper.dims must list the gripper dimensions")
+    if len(set(dims)) != len(dims):
+        raise TaskNormalizationError(f"gripper.dims repeats a dimension: {dims}")
+    if any(d < 0 or d >= DIM for d in dims):
+        raise TaskNormalizationError(f"gripper.dims must lie in [0, {DIM - 1}]: {dims}")
+    tolerance = gripper.get("sanity_tolerance")
+    if (not isinstance(tolerance, (int, float)) or isinstance(tolerance, bool)
+            or not np.isfinite(tolerance) or tolerance < 0):
+        raise TaskNormalizationError(
+            f"gripper.sanity_tolerance {tolerance!r} is not a non-negative finite number")
+    for side in ("state", "action"):
+        block = gripper.get(side)
+        if not isinstance(block, dict):
+            raise TaskNormalizationError(f"gripper.{side} is missing; both sides must be described")
+        for field in ("env_units", "training_units"):
+            if not isinstance(block.get(field), str) or not block[field]:
+                raise TaskNormalizationError(f"gripper.{side}.{field} is missing")
+        for field in ("env_range", "training_range"):
+            values = block.get(field)
+            if (not isinstance(values, list) or len(values) != 2
+                    or not all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                               for v in values)):
+                raise TaskNormalizationError(f"gripper.{side}.{field} must be a pair of numbers")
+            if not all(np.isfinite(v) for v in values):
+                raise TaskNormalizationError(f"gripper.{side}.{field} must be finite: {values}")
+            if values[1] <= values[0]:
+                # A degenerate range cannot define a conversion, and a reversed
+                # one would convert with the wrong sign.
+                raise TaskNormalizationError(
+                    f"gripper.{side}.{field} {values} is empty or reversed")
+    return gripper
 
 
 class TaskNorm:
@@ -124,11 +187,8 @@ class TaskNorm:
         self.content_sha256 = document["content_sha256"]
         self.task_sha256 = document["task_sha256"][slug]
         self.transform_version = payload.get("transform_version")
-        self.gripper = payload.get("gripper") or {}
-        if not self.gripper.get("state") or not self.gripper.get("action"):
-            raise TaskNormalizationError(
-                "the statistics do not describe the gripper units for both state and action; "
-                "without that the action unit would have to be guessed")
+        self.gripper = _checked_gripper(payload.get("gripper"))
+        threshold = float(payload["constant_std_threshold"])
         self.stats = {}
         for feature in FEATURES:
             mean = _vector(block, feature, "mean", slug)
@@ -136,7 +196,19 @@ class TaskNorm:
             mask_values = block.get(feature, {}).get("constant_mask")
             if not isinstance(mask_values, list) or len(mask_values) != DIM:
                 raise TaskNormalizationError(f"{slug}/{feature}: constant_mask must have {DIM} entries")
+            if not all(isinstance(v, bool) for v in mask_values):
+                # 0/1 or "false" would work by accident today and differently
+                # after any change to how the file is written.
+                raise TaskNormalizationError(
+                    f"{slug}/{feature}: constant_mask must be true/false, got "
+                    f"{sorted({type(v).__name__ for v in mask_values})}")
             mask = np.asarray(mask_values, dtype=bool)
+            expected = std <= threshold
+            if not np.array_equal(mask, expected):
+                disagreeing = [int(d) for d in np.nonzero(mask != expected)[0]]
+                raise TaskNormalizationError(
+                    f"{slug}/{feature}: constant_mask disagrees with std <= "
+                    f"{threshold} at {disagreeing}")
             if (std[~mask] <= 0).any():
                 raise TaskNormalizationError(
                     f"{slug}/{feature}: a dimension has std <= 0 but is not marked constant")
@@ -144,11 +216,39 @@ class TaskNorm:
 
     # ---- the transform ------------------------------------------------------------
 
+    def state_in_training_units(self, state: np.ndarray) -> np.ndarray:
+        """The observation converted to the unit the statistics were built in.
+
+        Today every measured task reports the gripper as a 0-1 ratio, the same
+        as the training data, so this is the identity. It exists because the
+        remaining nine tasks are unverified: if one of them turns out to report
+        metres, the conversion is defined by the two ranges in the metadata
+        rather than left to whoever notices the mismatch.
+        """
+        values = np.asarray(state, dtype=np.float64).reshape(-1)
+        block = self.gripper["state"]
+        if block["env_units"] == block["training_units"]:
+            return values
+        env_low, env_high = (float(v) for v in block["env_range"])
+        train_low, train_high = (float(v) for v in block["training_range"])
+        span = env_high - env_low
+        if span <= 0:
+            raise TaskNormalizationError(
+                f"gripper state env_range {block['env_range']} cannot be converted to "
+                f"{block['training_range']}")
+        converted = values.copy()
+        for index in self.gripper_indices:
+            if index < converted.shape[0]:
+                ratio = (converted[index] - env_low) / span
+                converted[index] = train_low + ratio * (train_high - train_low)
+        return converted
+
     def standardize_state(self, state: np.ndarray) -> np.ndarray:
         mean, std, mask = self.stats["observation.state"]
         values = np.asarray(state, dtype=np.float64).reshape(-1)
         if values.shape[0] != DIM:
             raise TaskNormalizationError(f"state has {values.shape[0]} values, expected {DIM}")
+        values = self.state_in_training_units(values)
         safe = np.where(mask, 1.0, std)
         return np.where(mask, 0.0, (values - mean) / safe).astype(np.float32)
 
@@ -167,7 +267,7 @@ class TaskNorm:
 
     @property
     def gripper_indices(self) -> tuple[int, ...]:
-        return tuple(int(i) for i in self.gripper.get("dims", (6, 13)))
+        return tuple(int(i) for i in self.gripper["dims"])
 
     @property
     def rescale_gripper(self) -> bool:
@@ -182,7 +282,7 @@ class TaskNorm:
 
     @property
     def gripper_source_range(self) -> tuple[float, float]:
-        low, high = self.gripper["action"].get("training_range", (0.0, 1.0))
+        low, high = self.gripper["action"]["training_range"]
         return float(low), float(high)
 
     def state_range_problem(self, state: np.ndarray) -> str | None:
@@ -192,21 +292,21 @@ class TaskNorm:
         but it does catch an observation that is nowhere near what the training
         data held.
         """
-        low, high = self.gripper["state"].get("training_range", (0.0, 1.0))
-        tolerance = float(self.gripper.get("sanity_tolerance", 0.05))
+        low, high = (float(v) for v in self.gripper["state"]["env_range"])
+        tolerance = float(self.gripper["sanity_tolerance"])
         values = np.asarray(state, dtype=np.float64).reshape(-1)
         for index in self.gripper_indices:
             if index >= values.shape[0]:
                 continue
             value = values[index]
             if not (low - tolerance <= value <= high + tolerance):
-                return (f"gripper state dim {index} is {value:.4f}, outside the training range "
+                return (f"gripper state dim {index} is {value:.4f}, outside the environment range "
                         f"[{low}, {high}] with tolerance {tolerance}")
         return None
 
     def action_space_problem(self, low: np.ndarray, high: np.ndarray) -> str | None:
         """Does the environment's action space match what the metadata claims?"""
-        expected_low, expected_high = self.gripper["action"].get("env_range", (0.0, 0.05))
+        expected_low, expected_high = self.gripper["action"]["env_range"]
         for index in self.gripper_indices:
             if index >= low.shape[0]:
                 continue

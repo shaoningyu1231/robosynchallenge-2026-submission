@@ -200,11 +200,12 @@ class SmolVLAWorkerClient:
         # and the units. legacy: exactly the behaviour Q1a and the official
         # checkpoints were evaluated with, heuristic included.
         self.task_norm = usr_args.get("smolvla_task_norm")
+        self._action_space_checked = False
+        self._state_range_checked = False
         if self.task_norm is not None:
             self.gripper_indices = self.task_norm.gripper_indices
             self.gripper_source_range = self.task_norm.gripper_source_range
             self.rescale_gripper = self.task_norm.rescale_gripper
-            self._state_range_warned = False
         else:
             self.gripper_indices = tuple(int(idx) for idx in usr_args.get("smolvla_gripper_indices", [6, 13]))
             source_range = usr_args.get("smolvla_gripper_source_range", [0.0, 1.0])
@@ -279,16 +280,19 @@ class SmolVLAWorkerClient:
     def standardize_state(self, state):
         """The observation in the checkpoint's training coordinates.
 
-        The raw gripper reading is range-checked first: it cannot prove a unit
-        (metres [0, 0.05] sit inside the ratio range), but an observation far
-        outside what the training data held means the two are not comparable,
-        and standardizing it would hide that.
+        The raw gripper reading is range-checked on the first observation of an
+        episode only. It answers "is this environment the one these statistics
+        describe", which is a property of the episode, not of the frame: checking
+        every step would end a run mid-trajectory over a transient overshoot,
+        and it cannot prove a unit anyway (metres [0, 0.05] sit inside the ratio
+        range), so it is a sanity check, not the unit proof.
         """
-        problem = self.task_norm.state_range_problem(state)
-        if problem and not self._state_range_warned:
-            self._state_range_warned = True
-            raise task_norm_module.TaskNormalizationError(
-                f"{problem}; the observation does not match the statistics in the checkpoint")
+        if not self._state_range_checked:
+            self._state_range_checked = True
+            problem = self.task_norm.state_range_problem(state)
+            if problem:
+                raise task_norm_module.TaskNormalizationError(
+                    f"{problem}; the observation does not match the statistics in the checkpoint")
         return self.task_norm.standardize_state(state)
 
     def check_action_space(self, env) -> None:
@@ -444,7 +448,10 @@ class SmolVLAWorkerClient:
         self.episode_timing = _empty_timing()
 
     def reset(self) -> None:
+        # Both checks are per-episode: the action space and the observation's
+        # units are properties of the environment this episode runs in.
         self._action_space_checked = False
+        self._state_range_checked = False
         self._episodes_started += 1
         self._debug_chunks_printed = 0
         self.episode_timing = _empty_timing()
