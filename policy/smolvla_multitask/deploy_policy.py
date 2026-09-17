@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from policy.inference_timing import finish_inference, start_inference
-from policy.smolvla_multitask import noise_seed
+from policy.smolvla_multitask import noise_seed, task_norm as task_norm_module
 from policy.smolvla_multitask.checkpoints import VLM_REQUIRED_FILES, materialize, resolve_source, resolve_vlm
 
 
@@ -196,10 +196,20 @@ class SmolVLAWorkerClient:
         self.check_success_each_step = bool(
             _resolve_optional_bool(usr_args.get("smolvla_check_success_each_step", False))
         )
-        self.gripper_indices = tuple(int(idx) for idx in usr_args.get("smolvla_gripper_indices", [6, 13]))
-        source_range = usr_args.get("smolvla_gripper_source_range", [0.0, 1.0])
-        self.gripper_source_range = (float(source_range[0]), float(source_range[1]))
-        self.rescale_gripper = self._resolve_gripper_rescale(usr_args.get("smolvla_rescale_gripper", "auto"))
+        # required: the checkpoint's own per-task statistics decide the transform
+        # and the units. legacy: exactly the behaviour Q1a and the official
+        # checkpoints were evaluated with, heuristic included.
+        self.task_norm = usr_args.get("smolvla_task_norm")
+        if self.task_norm is not None:
+            self.gripper_indices = self.task_norm.gripper_indices
+            self.gripper_source_range = self.task_norm.gripper_source_range
+            self.rescale_gripper = self.task_norm.rescale_gripper
+            self._state_range_warned = False
+        else:
+            self.gripper_indices = tuple(int(idx) for idx in usr_args.get("smolvla_gripper_indices", [6, 13]))
+            source_range = usr_args.get("smolvla_gripper_source_range", [0.0, 1.0])
+            self.gripper_source_range = (float(source_range[0]), float(source_range[1]))
+            self.rescale_gripper = self._resolve_gripper_rescale(usr_args.get("smolvla_rescale_gripper", "auto"))
         self.debug_actions = bool(usr_args.get("smolvla_debug_actions", False))
         self.debug_action_chunks = int(usr_args.get("smolvla_debug_action_chunks", 1))
         self.debug_action_log_path = usr_args.get("smolvla_debug_action_log_path")
@@ -265,6 +275,33 @@ class SmolVLAWorkerClient:
         valid_indices = [idx for idx in self.gripper_indices if idx < action_max.shape[0]]
         gripper_max = action_max[valid_indices]
         return bool(gripper_max.size and float(np.nanmax(gripper_max)) > 0.5)
+
+    def standardize_state(self, state):
+        """The observation in the checkpoint's training coordinates.
+
+        The raw gripper reading is range-checked first: it cannot prove a unit
+        (metres [0, 0.05] sit inside the ratio range), but an observation far
+        outside what the training data held means the two are not comparable,
+        and standardizing it would hide that.
+        """
+        problem = self.task_norm.state_range_problem(state)
+        if problem and not self._state_range_warned:
+            self._state_range_warned = True
+            raise task_norm_module.TaskNormalizationError(
+                f"{problem}; the observation does not match the statistics in the checkpoint")
+        return self.task_norm.standardize_state(state)
+
+    def check_action_space(self, env) -> None:
+        """Once per episode: does the env's gripper range match the metadata?"""
+        if getattr(self, "_action_space_checked", False):
+            return
+        self._action_space_checked = True
+        action_space = env.unwrapped.single_action_space
+        low = np.asarray(action_space.low, dtype=np.float64).reshape(-1)
+        high = np.asarray(action_space.high, dtype=np.float64).reshape(-1)
+        problem = self.task_norm.action_space_problem(low, high)
+        if problem:
+            raise task_norm_module.TaskNormalizationError(problem)
 
     def close(self) -> None:
         if getattr(self, "proc", None) is None or self.proc.poll() is not None:
@@ -407,6 +444,7 @@ class SmolVLAWorkerClient:
         self.episode_timing = _empty_timing()
 
     def reset(self) -> None:
+        self._action_space_checked = False
         self._episodes_started += 1
         self._debug_chunks_printed = 0
         self.episode_timing = _empty_timing()
@@ -469,6 +507,9 @@ class SmolVLAWorkerClient:
 
 
 def get_model(usr_args):
+    # Declared, never inferred: a Q1c checkpoint that lost its statistics must
+    # fail here rather than quietly evaluate as a legacy one.
+    mode = task_norm_module.resolve_mode(usr_args)
     # Order and rules live in checkpoints.py: explicit checkpoint_dir, then the
     # task's entry, then the default; never the official checkpoints by accident.
     source = resolve_source(usr_args)
@@ -482,6 +523,21 @@ def get_model(usr_args):
         f"VLM backbone: {vlm.describe()} -> {vlm_dir}",
         flush=True,
     )
+    if mode == "required":
+        task_norm_module.reject_legacy_overrides(usr_args)
+        document = task_norm_module.load_document(checkpoint_dir)
+        # The canonical task name the evaluator passes, not the instruction:
+        # instructions are model input, and two tasks could share wording.
+        slug = usr_args.get("task_name")
+        if not slug:
+            raise task_norm_module.TaskNormalizationError(
+                "the evaluator did not pass task_name; task-conditioned statistics "
+                "cannot be selected without it")
+        norm = task_norm_module.TaskNorm(document, str(slug))
+        usr_args["smolvla_task_norm"] = norm
+        print(f"Task-conditioned normalization: {norm.slug} "
+              f"({norm.transform_version}, content {norm.content_sha256[:16]}, "
+              f"task {norm.task_sha256[:16]})", flush=True)
     usr_args["checkpoint_dir"] = str(checkpoint_dir)
     usr_args["smolvla_vlm_path"] = str(vlm_dir)
     usr_args["smolvla_vlm_repo_id"] = vlm.repo_id
@@ -490,6 +546,8 @@ def get_model(usr_args):
     usr_args["checkpoint_path"] = source.describe()
     base = noise_seed.parse_base(usr_args.get("smolvla_noise_seed"))
     usr_args["checkpoint_metadata"] = {
+        "task_normalization": (usr_args["smolvla_task_norm"].metadata()
+                               if mode == "required" else {"mode": "legacy"}),
         "policy": {
             "origin": source.origin,
             "repo_id": source.repo_id,
@@ -515,7 +573,15 @@ def eval(env, model, obs):
     inference_times_s = []
     started_at = start_inference()
     encoded_obs = encode_obs(obs, image_keys=model.image_keys)
+    if model.task_norm is not None:
+        model.check_action_space(env)
+        encoded_obs["observation.state"] = model.standardize_state(encoded_obs["observation.state"])
     actions = model.infer(encoded_obs, task=instruction)
+    if model.task_norm is not None:
+        # Back to training units before anything env-facing touches them, so
+        # encode_action's gripper conversion sees the same values it would for a
+        # checkpoint trained without task-conditioned normalization.
+        actions = [model.task_norm.unstandardize_action(action) for action in actions]
     finish_inference(started_at, inference_times_s)
     model.record_call(inference_times_s[-1])
     model.maybe_print_action_debug(actions)

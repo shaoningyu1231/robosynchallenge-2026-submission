@@ -101,6 +101,19 @@ lerobot_root: ""
 smolvla_python: ""
 smolvla_cuda_visible_devices: 0
 smolvla_steps: 10
+# Which normalization the checkpoint was trained with. Declared here, never
+# inferred from whether a file happens to sit next to the weights.
+#   legacy   -- Q1a and the official checkpoints: LeRobot's own normalizer only,
+#               and the gripper unit decided from the checkpoint's action.max
+#   required -- Q1c: the checkpoint carries per-task statistics in
+#               task_normalization.json, which are applied to the state and
+#               undone on the action, and which also state the gripper units.
+#               A missing file, an unknown task or a digest that does not match
+#               ends the run instead of guessing.
+# In required mode smolvla_rescale_gripper, smolvla_gripper_indices and
+# smolvla_gripper_source_range are refused: the statistics decide the units, and
+# a second conversion on top of them would look plausible and be wrong.
+smolvla_task_normalization: legacy
 smolvla_rescale_gripper: auto
 smolvla_gripper_indices: [6, 13]
 smolvla_gripper_source_range: [0.0, 1.0]
