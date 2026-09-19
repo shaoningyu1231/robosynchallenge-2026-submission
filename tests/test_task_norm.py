@@ -348,5 +348,49 @@ class Mode(unittest.TestCase):
             self.assertIn(name, str(caught.exception))
 
 
+class ModeContract(unittest.TestCase):
+    """Declared mode against what the checkpoint carries: both directions refuse."""
+
+    def checkpoint(self, statistics=None):
+        directory = Path(tempfile.mkdtemp())
+        path = directory / task_norm.STATISTICS_FILE
+        if statistics == "file":
+            path.write_text(json.dumps(document({"t": block(np.zeros(DIM), np.ones(DIM))})))
+        elif statistics == "dangling":
+            path.symlink_to(directory / "gone.json")
+        elif statistics == "directory":
+            path.mkdir()
+        return directory
+
+    def test_required_with_statistics_passes(self):
+        task_norm.check_mode_matches_checkpoint("required", self.checkpoint("file"))
+
+    def test_required_without_statistics_is_refused(self):
+        with self.assertRaises(task_norm.TaskNormalizationError) as caught:
+            task_norm.check_mode_matches_checkpoint("required", self.checkpoint())
+        self.assertIn("does not exist", str(caught.exception))
+
+    def test_legacy_without_statistics_passes(self):
+        task_norm.check_mode_matches_checkpoint("legacy", self.checkpoint())
+
+    def test_legacy_with_statistics_is_refused(self):
+        # What happened on 2026-09-19, when nothing refused it.
+        with self.assertRaises(task_norm.TaskNormalizationError) as caught:
+            task_norm.check_mode_matches_checkpoint("legacy", self.checkpoint("file"))
+        self.assertIn("legacy", str(caught.exception))
+        self.assertIn(task_norm.STATISTICS_FILE, str(caught.exception))
+
+    def test_legacy_refuses_anything_under_that_name(self):
+        # Not "a readable file": the name alone is the checkpoint's claim.
+        for kind in ("dangling", "directory"):
+            with self.subTest(kind=kind), self.assertRaises(task_norm.TaskNormalizationError):
+                task_norm.check_mode_matches_checkpoint("legacy", self.checkpoint(kind))
+
+    def test_an_unresolved_mode_is_refused(self):
+        for mode in ("Legacy", "auto", None):
+            with self.subTest(mode=mode), self.assertRaises(task_norm.TaskNormalizationError):
+                task_norm.check_mode_matches_checkpoint(mode, self.checkpoint())
+
+
 if __name__ == "__main__":
     unittest.main()

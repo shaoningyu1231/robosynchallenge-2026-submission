@@ -84,7 +84,9 @@ smolvla_steps: 10
 # Which normalization the checkpoint was trained with. Declared here, never
 # inferred from whether a file happens to sit next to the weights.
 #   legacy   -- Q1a and the official checkpoints: LeRobot's own normalizer only,
-#               and the gripper unit decided from the checkpoint's action.max
+#               and the gripper unit decided from the checkpoint's action.max.
+#               A checkpoint that carries task_normalization.json is refused:
+#               legacy would run it without its transform.
 #   required -- Q1c: the checkpoint carries per-task statistics in
 #               task_normalization.json, which are applied to the state and
 #               undone on the action, and which also state the gripper units.

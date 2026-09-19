@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import numpy as np
 
+STATISTICS_FILE = "task_normalization.json"
 FEATURES = ("observation.state", "action")
 DIM = 14
 # What this adapter knows how to undo. A checkpoint standardized some other way
@@ -78,7 +80,7 @@ def load_document(checkpoint_dir: Path) -> dict:
     The structure is demanded, not sniffed: an empty object is valid JSON and
     must not pass for a set of statistics.
     """
-    path = Path(checkpoint_dir) / "task_normalization.json"
+    path = Path(checkpoint_dir) / STATISTICS_FILE
     if not path.is_file():
         raise TaskNormalizationError(
             f"no {path}; this checkpoint was not trained with task-conditioned "
@@ -362,3 +364,38 @@ def resolve_mode(usr_args: dict) -> str:
         raise TaskNormalizationError(
             f"smolvla_task_normalization={mode!r} is not 'required' or 'legacy'")
     return mode
+
+
+def check_mode_matches_checkpoint(mode: str, checkpoint_dir) -> None:
+    """The declared mode and the checkpoint must agree, in both directions.
+
+    required without statistics: there is nothing to standardize with.
+    legacy with statistics: the checkpoint was trained on state and action
+    standardized per task, and legacy mode would feed it the globally normalized
+    observation and execute its output as if it were in training units -- motion
+    that looks plausible and is wrong. That second case is not hypothetical: on
+    2026-09-19 a curve point read a config that had been switched back to legacy
+    and evaluated a Q1c checkpoint to the end (2/30, discarded) without a word.
+
+    The mode is still declared, never inferred; this only refuses a declaration
+    the checkpoint contradicts. get_model calls it before anything is started --
+    no VLM download, no worker. Presence is lexists: a dangling link or a
+    directory under that name is still a claim the checkpoint makes.
+    """
+    path = Path(checkpoint_dir) / STATISTICS_FILE
+    present = os.path.lexists(path)
+    if mode == "required":
+        if not present:
+            raise TaskNormalizationError(
+                f"smolvla_task_normalization=required, but {path} does not exist: this "
+                f"checkpoint was not trained with task-conditioned normalization, or the file "
+                f"was not shipped with it")
+    elif mode == "legacy":
+        if present:
+            raise TaskNormalizationError(
+                f"smolvla_task_normalization=legacy, but the checkpoint carries {path}: it was "
+                f"trained with task-conditioned normalization, and legacy mode would run it "
+                f"without the transform. Use a required config "
+                f"(policy/smolvla_multitask/test_configs/q1c_taskstd.yml)")
+    else:
+        raise TaskNormalizationError(f"unknown mode {mode!r}; resolve_mode first")

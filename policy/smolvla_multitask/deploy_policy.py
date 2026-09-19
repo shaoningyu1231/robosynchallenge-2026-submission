@@ -523,6 +523,10 @@ def get_model(usr_args):
     vlm = resolve_vlm(usr_args)
     python_bin = usr_args.get("smolvla_python") or os.environ.get("SMOLVLA_PYTHON") or sys.executable
     checkpoint_dir = materialize(source, python_bin)
+    # Both directions, before the VLM is fetched or the worker started: a Q1c
+    # checkpoint under a legacy config is refused just like a required config
+    # without statistics.
+    task_norm_module.check_mode_matches_checkpoint(mode, checkpoint_dir)
     vlm_dir = materialize(vlm, python_bin, required=VLM_REQUIRED_FILES)
     print(
         f"Checkpoint for {usr_args['task_name']}: {source.describe()} "

@@ -19,6 +19,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from policy.smolvla_multitask import deploy_policy  # noqa: E402
 from policy.smolvla_multitask.checkpoints import CheckpointError  # noqa: E402
+from policy.smolvla_multitask import task_norm  # noqa: E402
 
 REV = "7b375e1b73b11138ff12fe22c8f2822d8fe03467"
 
@@ -68,9 +69,42 @@ class WorkerStart(unittest.TestCase):
         self.assertEqual(env, ["1", "1"])
 
     def test_get_model_refuses_to_start_without_a_vlm_pin(self):
-        config = {"task_name": "click_bell", "checkpoint_dir": str(self.checkpoint), "smolvla_python": self.python}
+        config = {"task_name": "click_bell", "checkpoint_dir": str(self.checkpoint), "smolvla_python": self.python,
+                  "smolvla_task_normalization": "legacy"}
         with self.assertRaisesRegex(CheckpointError, "must be pinned"):
             deploy_policy.get_model(config)
+
+    def mode_config(self, mode):
+        # A complete checkpoint as far as materialize can tell, so the refusal
+        # under test is the only thing that can stop get_model.
+        (self.checkpoint / "model.safetensors").write_bytes(b"")
+        return {"task_name": "table_rearrangement", "checkpoint_dir": str(self.checkpoint),
+                "smolvla_python": self.python, "smolvla_task_normalization": mode,
+                "vlm": {"repo_id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct", "revision": REV}}
+
+    def assert_nothing_was_started(self):
+        # The fake Python records every launch: a VLM fetch or a worker would leave these.
+        self.assertFalse(Path(f"{self.record}.args").exists(), "something was launched before the refusal")
+        self.assertFalse(Path(f"{self.record}.env").exists())
+
+    def test_legacy_config_refuses_a_checkpoint_that_carries_statistics(self):
+        (self.checkpoint / task_norm.STATISTICS_FILE).write_text("{}")
+        with self.assertRaisesRegex(task_norm.TaskNormalizationError, "legacy"):
+            deploy_policy.get_model(self.mode_config("legacy"))
+        self.assert_nothing_was_started()
+
+    def test_required_config_refuses_a_checkpoint_without_statistics(self):
+        with self.assertRaisesRegex(task_norm.TaskNormalizationError, "does not exist"):
+            deploy_policy.get_model(self.mode_config("required"))
+        self.assert_nothing_was_started()
+
+    def test_a_consistent_legacy_config_gets_past_the_contract(self):
+        # Otherwise the two tests above would pass for any early failure. Here
+        # the next step runs: the (fake) VLM fetch starts, prints nothing, and
+        # materialize complains -- about the download, not about the mode.
+        with self.assertRaisesRegex(CheckpointError, "printed nothing"):
+            deploy_policy.get_model(self.mode_config("legacy"))
+        self.assertTrue(Path(f"{self.record}.args").exists())
 
 
 if __name__ == "__main__":
