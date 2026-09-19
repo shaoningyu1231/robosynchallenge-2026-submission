@@ -130,6 +130,10 @@ class AdapterSeeding(unittest.TestCase):
         client.replan_steps, client.smolvla_steps = None, 10
         client.image_keys = self.fakes.FakeModel.image_keys
         client.rescale_gripper, client.gripper_indices, client.gripper_source_range = False, (6, 13), (0.0, 1.0)
+        # What __init__ sets in legacy mode (the path these tests cover). Built by
+        # hand, so every attribute __init__ gains has to be added here too; the
+        # three below were missing from patch 0022 until 2026-09-19.
+        client.task_norm, client._action_space_checked, client._state_range_checked = None, False, False
         client.check_success_each_step = False
         client.debug_actions, client._debug_chunks_printed, client.debug_action_log_path = False, 0, None
         client.dump_obs_dir, client.dump_obs_calls, client._episodes_started = None, 5, 0
