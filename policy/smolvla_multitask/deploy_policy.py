@@ -207,10 +207,15 @@ class SmolVLAWorkerClient:
             self.gripper_source_range = self.task_norm.gripper_source_range
             self.rescale_gripper = self.task_norm.rescale_gripper
         else:
-            self.gripper_indices = tuple(int(idx) for idx in usr_args.get("smolvla_gripper_indices", [6, 13]))
-            source_range = usr_args.get("smolvla_gripper_source_range", [0.0, 1.0])
+            # A mixed routing cannot state these: they are refused for the
+            # required-mode task, so the config leaves them out and the legacy
+            # tasks take the same defaults the official baseline config spells out.
+            indices = usr_args.get("smolvla_gripper_indices")
+            self.gripper_indices = tuple(int(idx) for idx in ([6, 13] if indices is None else indices))
+            source_range = usr_args.get("smolvla_gripper_source_range") or [0.0, 1.0]
             self.gripper_source_range = (float(source_range[0]), float(source_range[1]))
-            self.rescale_gripper = self._resolve_gripper_rescale(usr_args.get("smolvla_rescale_gripper", "auto"))
+            self.rescale_gripper = self._resolve_gripper_rescale(
+                usr_args.get("smolvla_rescale_gripper") or "auto")
         self.debug_actions = bool(usr_args.get("smolvla_debug_actions", False))
         self.debug_action_chunks = int(usr_args.get("smolvla_debug_action_chunks", 1))
         self.debug_action_log_path = usr_args.get("smolvla_debug_action_log_path")
@@ -514,12 +519,14 @@ class SmolVLAWorkerClient:
 
 
 def get_model(usr_args):
-    # Declared, never inferred: a Q1c checkpoint that lost its statistics must
-    # fail here rather than quietly evaluate as a legacy one.
-    mode = task_norm_module.resolve_mode(usr_args)
     # Order and rules live in checkpoints.py: explicit checkpoint_dir, then the
     # task's entry, then the default; never the official checkpoints by accident.
+    # It comes first because the entry is also where a mixed routing declares
+    # this task's normalization.
     source = resolve_source(usr_args)
+    # Declared, never inferred: a checkpoint that lost its statistics must fail
+    # here rather than quietly evaluate as a legacy one.
+    mode = task_norm_module.resolve_mode(usr_args, source.mode)
     vlm = resolve_vlm(usr_args)
     python_bin = usr_args.get("smolvla_python") or os.environ.get("SMOLVLA_PYTHON") or sys.executable
     checkpoint_dir = materialize(source, python_bin)
@@ -545,6 +552,12 @@ def get_model(usr_args):
                 "the evaluator did not pass task_name; task-conditioned statistics "
                 "cannot be selected without it")
         norm = task_norm_module.TaskNorm(document, str(slug))
+        if source.content_sha256 is not None and norm.content_sha256 != source.content_sha256:
+            # The entry names one statistics document; a checkpoint carrying
+            # another would run, and its numbers would not be this submission's.
+            raise task_norm_module.TaskNormalizationError(
+                f"{source.origin}.content_sha256 is {source.content_sha256}, but the checkpoint "
+                f"carries {norm.content_sha256}")
         usr_args["smolvla_task_norm"] = norm
         print(f"Task-conditioned normalization: {norm.slug} "
               f"({norm.transform_version}, content {norm.content_sha256[:16]}, "
@@ -564,6 +577,9 @@ def get_model(usr_args):
             "repo_id": source.repo_id,
             "revision": source.revision,
             "path": str(checkpoint_dir),
+            "mode": mode,
+            "mode_declared_by": source.origin if source.mode else "smolvla_task_normalization",
+            "expected_content_sha256": source.content_sha256,
         },
         "vlm": {"repo_id": vlm.repo_id, "revision": vlm.revision, "path": str(vlm_dir)},
         "policy_noise": None if base is None else {

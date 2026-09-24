@@ -348,18 +348,33 @@ def reject_legacy_overrides(usr_args: dict) -> None:
             f"the units come from the checkpoint's statistics")
 
 
-def resolve_mode(usr_args: dict) -> str:
+def resolve_mode(usr_args: dict, declared: str | None = None) -> str:
     """required or legacy, declared by the config -- never inferred from a file.
 
     Inferring it would mean a checkpoint that lost its statistics quietly
     evaluates as a legacy one.
+
+    `declared` is the mode the task's own checkpoint entry states, which is how
+    a mixed routing says it: the submission sends items_handover to a checkpoint
+    with per-task statistics and the other nine tasks to the official legacy
+    ones, and one scalar cannot be right for both. When an entry declares a
+    mode, the scalar must not also be set -- two places to change would let a
+    later edit move one and leave the other, and the run would still start.
     """
-    mode = usr_args.get("smolvla_task_normalization")
-    if mode is None:
+    global_mode = usr_args.get("smolvla_task_normalization")
+    if declared is not None:
+        if global_mode is not None:
+            raise TaskNormalizationError(
+                f"the checkpoint entry declares mode {declared!r}, so "
+                f"smolvla_task_normalization must not be set as well (it is {global_mode!r}); "
+                "with a per-task routing there is no single mode to declare")
+        return declared
+    if global_mode is None:
         raise TaskNormalizationError(
-            "smolvla_task_normalization must be set to 'required' (Q1c checkpoints, which "
-            "carry per-task statistics) or 'legacy' (Q1a and the official checkpoints)")
-    mode = str(mode).strip().lower()
+            "no mode declared: set smolvla_task_normalization to 'required' (checkpoints that "
+            "carry per-task statistics) or 'legacy' (Q1a and the official checkpoints), or give "
+            "each checkpoints.tasks entry its own mode")
+    mode = str(global_mode).strip().lower()
     if mode not in ("required", "legacy"):
         raise TaskNormalizationError(
             f"smolvla_task_normalization={mode!r} is not 'required' or 'legacy'")

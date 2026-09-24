@@ -33,6 +33,7 @@ except ImportError:  # pragma: no cover
 TASKS = {"click_bell", "handle_basket", "sample_loading"}
 REV_A = "a" * 40
 REV_B = "b" * 40
+Q2A_CONTENT_SHA256 = "36b048b902310a97fe0029d048071ffb1645453ef0c7032565b2382adbfbca14"
 OFFICIAL_TASKS = {
     "table_rearrangement", "click_bell", "water_pouring", "handle_basket", "items_handover",
     "drawer_open_place", "mixer_operating", "item_assembly", "manipulate_pipette", "sample_loading",
@@ -116,6 +117,103 @@ class EntryValidation(unittest.TestCase):
         self.assertLessEqual(OFFICIAL_TASKS, checkpoints.known_tasks())
 
 
+class PerTaskMode(unittest.TestCase):
+    """A mixed routing declares each task's normalization beside its checkpoint."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.local = Path(self.tmp.name) / "ckpt"
+        self.local.mkdir()
+
+    def table(self, **tasks):
+        return {"checkpoints": {"default": None, "tasks": tasks}}
+
+    def test_each_entry_carries_its_own_mode(self):
+        config = self.table(
+            click_bell={**entry(), "mode": "required", "content_sha256": "a" * 64},
+            handle_basket={**entry(repo="RoboSynChallenge/SmolVLA_sim_handle_basket"), "mode": "legacy"},
+            sample_loading={**entry(), "mode": "legacy"})
+        first = resolve(task_name="click_bell", **config)
+        self.assertEqual((first.mode, first.content_sha256), ("required", "a" * 64))
+        self.assertEqual(resolve(task_name="handle_basket", **config).mode, "legacy")
+
+    def test_a_half_declared_table_is_refused_on_every_task(self):
+        # The entries without a mode would fall back to the single scalar, which
+        # under a mixed routing is by definition wrong for one of the groups.
+        config = self.table(click_bell={**entry(), "mode": "required"},
+                            handle_basket=entry(), sample_loading=entry())
+        for task in ("click_bell", "handle_basket", "sample_loading"):
+            with self.subTest(task=task), self.assertRaises(checkpoints.CheckpointError) as cm:
+                resolve(task_name=task, **config)
+            self.assertIn("either every checkpoint entry declares a mode", str(cm.exception))
+
+    def test_per_task_modes_forbid_a_default(self):
+        config = {"checkpoints": {"default": {**entry(), "mode": "legacy"},
+                                  "tasks": {"click_bell": {**entry(), "mode": "required"}}}}
+        with self.assertRaises(checkpoints.CheckpointError) as cm:
+            resolve(task_name="handle_basket", **config)
+        self.assertIn("cannot be combined with per-task modes", str(cm.exception))
+
+    def test_an_unlisted_or_misspelt_task_has_nowhere_to_fall(self):
+        config = self.table(click_bell={**entry(), "mode": "legacy"})
+        with self.assertRaises(checkpoints.CheckpointError) as cm:
+            resolve(task_name="handle_basket", **config)
+        self.assertIn("Refusing to guess", str(cm.exception))
+        with self.assertRaises(checkpoints.CheckpointError) as cm:
+            resolve(task_name="click_bel", **config)
+        self.assertIn("unknown task_name", str(cm.exception))
+        with self.assertRaises(checkpoints.CheckpointError) as cm:
+            resolve(task_name="click_bell", **self.table(click_bel={**entry(), "mode": "legacy"}))
+        self.assertIn("unknown tasks", str(cm.exception))
+
+    def test_an_invalid_mode_or_digest_is_refused(self):
+        for bad, message in (({"mode": "Required "}, None),      # accepted, normalised
+                             ({"mode": "strict"}, ".mode must be one of"),
+                             ({"mode": True}, ".mode must be one of"),
+                             ({"mode": "required", "content_sha256": "abc"}, ".content_sha256 must be"),
+                             ({"mode": "legacy", "content_sha256": "a" * 64},
+                              "only a required-mode entry")):
+            config = self.table(click_bell={**entry(), **bad})
+            with self.subTest(entry=bad):
+                if message is None:
+                    self.assertEqual(resolve(task_name="click_bell", **config).mode, "required")
+                else:
+                    with self.assertRaises(checkpoints.CheckpointError) as cm:
+                        resolve(task_name="click_bell", **config)
+                    self.assertIn(message, str(cm.exception))
+
+    def test_a_misspelt_optional_key_does_not_become_no_mode(self):
+        config = self.table(click_bell={**entry(), "mod": "required"})
+        with self.assertRaises(checkpoints.CheckpointError) as cm:
+            resolve(task_name="click_bell", **config)
+        self.assertIn("may add", str(cm.exception))
+
+    def test_a_local_entry_routes_one_task_to_a_directory(self):
+        source = resolve(task_name="click_bell", **self.table(
+            click_bell={"local_dir": str(self.local), "mode": "required",
+                        "content_sha256": "b" * 64}))
+        self.assertEqual(source.local_dir, self.local.resolve())
+        self.assertEqual((source.mode, source.content_sha256), ("required", "b" * 64))
+        self.assertIsNone(source.repo_id)
+
+    def test_a_local_entry_still_rejects_unknown_keys_and_missing_directories(self):
+        with self.assertRaises(checkpoints.CheckpointError):
+            resolve(task_name="click_bell",
+                    **self.table(click_bell={"local_dir": str(self.local), "revision": REV_A}))
+        with self.assertRaises(checkpoints.CheckpointError):
+            resolve(task_name="click_bell",
+                    **self.table(click_bell={"local_dir": str(self.local / "nope")}))
+
+    def test_the_table_is_validated_even_for_a_task_that_resolves(self):
+        # A broken entry for another task must not wait until that task runs.
+        config = self.table(click_bell={**entry(), "mode": "legacy"},
+                            handle_basket={**entry(), "mode": "sideways"})
+        with self.assertRaises(checkpoints.CheckpointError) as cm:
+            resolve(task_name="click_bell", **config)
+        self.assertIn("checkpoints.tasks.handle_basket.mode", str(cm.exception))
+
+
 class VlmPin(unittest.TestCase):
     PINNED = {"repo_id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct", "revision": REV_A}
 
@@ -180,20 +278,53 @@ class ShippedConfigs(unittest.TestCase):
     def load(self, relative):
         return yaml.safe_load((POLICY_DIR / relative).read_text())
 
-    def test_submission_config_never_names_the_official_checkpoints(self):
-        text = (POLICY_DIR / "deploy_policy.yml").read_text()
-        self.assertNotIn("SmolVLA_sim_", text)
+    def test_submission_config_matches_the_frozen_mapping(self):
+        # The mapping was frozen on 2026-09-24 (experiments/SUBMISSION_MAPPING.txt
+        # in the research repository) after Q1d and the Q2-A checkpoint screen both
+        # failed the pre-declared admission rule: items_handover goes to this
+        # project's checkpoint, the other nine to the official ones. Naming the
+        # official checkpoints is therefore deliberate here -- but only task by
+        # task. What must never happen is one arriving through a default or a
+        # fallback, which would score the official model under this submission's
+        # name on a task nobody chose it for.
         config = self.load("deploy_policy.yml")
         self.assertEqual(config["policy_name"], "smolvla_multitask")
         self.assertEqual(config["checkpoint_dir"], "")
-        # Whatever is configured must resolve cleanly, or fail loudly as "not configured".
+        self.assertIsNone(config["checkpoints"]["default"])
+        self.assertEqual(set(config["checkpoints"]["tasks"]), OFFICIAL_TASKS)
         for task in sorted(OFFICIAL_TASKS):
-            try:
-                source = checkpoints.resolve_source({**config, "task_name": task})
-            except checkpoints.CheckpointError as exc:
-                self.assertIn("Refusing to guess", str(exc))
-            else:
+            source = checkpoints.resolve_source({**config, "task_name": task})
+            self.assertEqual(source.origin, f"checkpoints.tasks.{task}")
+            if task == "items_handover":
                 self.assertNotIn("SmolVLA_sim_", source.describe())
+                self.assertEqual(source.mode, "required")
+                self.assertEqual(source.content_sha256, Q2A_CONTENT_SHA256)
+            else:
+                self.assertEqual(source.repo_id, f"RoboSynChallenge/SmolVLA_sim_{task}")
+                self.assertEqual(source.mode, "legacy")
+                self.assertIsNone(source.content_sha256)
+
+    def test_submission_config_declares_no_global_mode_and_no_gripper_overrides(self):
+        # One scalar cannot describe a routing where nine tasks are legacy and
+        # one is required, and in required mode the gripper keys are refused.
+        config = self.load("deploy_policy.yml")
+        self.assertIsNone(config["smolvla_task_normalization"])
+        for key in ("smolvla_rescale_gripper", "smolvla_gripper_indices",
+                    "smolvla_gripper_source_range"):
+            self.assertIsNone(config[key], key)
+
+    def test_submission_config_still_needs_the_published_checkpoint(self):
+        # Q2-A lives on our own disks; the graders cannot fetch a placeholder.
+        # This records the one edit the submission is still waiting on, and will
+        # start failing the moment the entry is filled in -- at which point the
+        # assertion below is the thing to delete.
+        entry = self.load("deploy_policy.yml")["checkpoints"]["tasks"]["items_handover"]
+        self.assertTrue(entry["repo_id"].startswith("PLACEHOLDER/"))
+        self.assertEqual(entry["revision"], "0" * 40)
+
+    def test_a_local_entry_cannot_be_shipped(self):
+        text = (POLICY_DIR / "deploy_policy.yml").read_text()
+        self.assertNotIn("local_dir", text)
 
     def test_both_configs_seed_the_noise(self):
         for f in ("deploy_policy.yml", "test_configs/official_baseline.yml"):
@@ -213,13 +344,27 @@ class ShippedConfigs(unittest.TestCase):
             source = checkpoints.resolve_source({**config, "task_name": task})
             self.assertEqual(source.repo_id, f"RoboSynChallenge/SmolVLA_sim_{task}")
 
-    def test_baseline_config_differs_from_the_submission_only_in_checkpoints_and_name(self):
+    def test_baseline_config_differs_from_the_submission_only_where_it_must(self):
+        # The two configs are the same evaluation. They differ in the routing,
+        # the name, and -- since the submission is mixed -- where the mode is
+        # declared: the baseline is one legacy model for every task and keeps
+        # the scalar, the submission declares a mode per entry instead.
         submission = self.load("deploy_policy.yml")
         baseline = self.load("test_configs/official_baseline.yml")
+        differ = ("checkpoints", "model_name", "smolvla_task_normalization",
+                  "smolvla_rescale_gripper", "smolvla_gripper_indices",
+                  "smolvla_gripper_source_range")
         for config in (submission, baseline):
-            config.pop("checkpoints")
-            config.pop("model_name")
+            for key in differ:
+                config.pop(key)
         self.assertEqual(submission, baseline)
+        # and the values the submission leaves unset are the ones the adapter
+        # falls back to, so the nine legacy tasks behave exactly as the baseline.
+        baseline_again = self.load("test_configs/official_baseline.yml")
+        self.assertEqual(baseline_again["smolvla_task_normalization"], "legacy")
+        self.assertEqual(baseline_again["smolvla_rescale_gripper"], "auto")
+        self.assertEqual(baseline_again["smolvla_gripper_indices"], [6, 13])
+        self.assertEqual(baseline_again["smolvla_gripper_source_range"], [0.0, 1.0])
 
 
 if __name__ == "__main__":

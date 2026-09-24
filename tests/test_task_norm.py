@@ -340,6 +340,27 @@ class Mode(unittest.TestCase):
         self.assertEqual(task_norm.resolve_mode({"smolvla_task_normalization": "required"}), "required")
         self.assertEqual(task_norm.resolve_mode({"smolvla_task_normalization": "Legacy"}), "legacy")
 
+    def test_an_entry_mode_replaces_the_scalar(self):
+        # How a mixed routing declares it: the task's checkpoint entry says
+        # which normalization that checkpoint was trained with.
+        self.assertEqual(task_norm.resolve_mode({}, "required"), "required")
+        self.assertEqual(task_norm.resolve_mode({}, "legacy"), "legacy")
+        self.assertEqual(
+            task_norm.resolve_mode({"smolvla_task_normalization": None}, "required"), "required")
+
+    def test_declaring_it_in_both_places_is_refused(self):
+        # Two places to change means a later edit can move one and leave the
+        # other, and the run would still start -- with the wrong transform.
+        with self.assertRaises(task_norm.TaskNormalizationError) as caught:
+            task_norm.resolve_mode({"smolvla_task_normalization": "legacy"}, "required")
+        self.assertIn("must not be set as well", str(caught.exception))
+
+    def test_no_mode_anywhere_names_both_ways_of_declaring_it(self):
+        with self.assertRaises(task_norm.TaskNormalizationError) as caught:
+            task_norm.resolve_mode({}, None)
+        self.assertIn("smolvla_task_normalization", str(caught.exception))
+        self.assertIn("checkpoints.tasks", str(caught.exception))
+
     def test_required_refuses_the_old_gripper_overrides(self):
         task_norm.reject_legacy_overrides({"smolvla_rescale_gripper": "auto"})     # the default
         for name in task_norm.LEGACY_ONLY_ARGS:

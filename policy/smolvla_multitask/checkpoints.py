@@ -12,6 +12,15 @@
 # task were silently missing from the table, the evaluation would score the
 # official model under this submission's name; failing is the only safe answer.
 #
+# Each entry may also declare `mode` -- the normalization its checkpoint was
+# trained with -- and, in required mode, the `content_sha256` of the statistics
+# it must carry. That is what a mixed routing needs: nine tasks on the official
+# legacy checkpoints and one on a checkpoint with per-task statistics cannot
+# share a single smolvla_task_normalization scalar, and picking the mode from
+# whether a file happens to sit next to the weights is exactly the inference
+# this adapter refuses to make. Either every entry declares a mode -- and then
+# the scalar must be absent -- or none does.
+#
 # The VLM backbone is pinned the same way (the `vlm` entry). A SmolVLA checkpoint
 # names its backbone only by repo id, and LeRobot loads that id -- weights,
 # config, processor and tokenizer -- from the Hub's current main. Without the
@@ -34,6 +43,12 @@ FETCH_SCRIPT = POLICY_DIR / "fetch_checkpoint.py"
 FULL_REVISION = re.compile(r"[0-9a-f]{40}")
 REPO_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*")
 ENTRY_KEYS = {"repo_id", "revision"}
+# Optional per-entry keys. `mode` is how a mixed routing declares, for each
+# task, which normalization its checkpoint was trained with; `content_sha256`
+# binds a required-mode entry to one statistics document.
+OPTIONAL_ENTRY_KEYS = {"mode", "content_sha256"}
+MODES = ("legacy", "required")
+CONTENT_SHA256 = re.compile(r"[0-9a-f]{64}")
 # Files a LeRobot SmolVLA checkpoint cannot load without.
 REQUIRED_FILES = ("config.json", "model.safetensors")
 # Files the pinned VLM snapshot must provide: the checkpoints set
@@ -52,6 +67,11 @@ class CheckpointSource:
     local_dir: Path | None = None
     repo_id: str | None = None
     revision: str | None = None
+    # Declared beside the checkpoint, so a task cannot be routed to one model
+    # and normalized as another. None means the entry declared no mode and the
+    # config's single smolvla_task_normalization applies (one model, every task).
+    mode: str | None = None
+    content_sha256: str | None = None
 
     def describe(self) -> str:
         if self.local_dir is not None:
@@ -64,14 +84,34 @@ def known_tasks(configs_dir: Path = REPO_ROOT / "configs") -> set[str]:
     return {p.parent.parent.name for p in configs_dir.glob("*/*/gym_config.json")}
 
 
+def _is_local_entry(entry) -> bool:
+    return isinstance(entry, dict) and "local_dir" in entry
+
+
+def _local_entry(entry, where: str) -> Path:
+    """A task routed to a directory on this machine.
+
+    Only for runs on our own boxes -- the holdout has to exercise the real mixed
+    routing before the checkpoint is published anywhere. A shipped submission
+    cannot use it (the graders do not have the directory), which
+    tests/test_smolvla_multitask_checkpoints.py checks.
+    """
+    keys = set(entry)
+    if not keys <= {"local_dir"} | OPTIONAL_ENTRY_KEYS:
+        raise CheckpointError(
+            f"{where} may have local_dir and {sorted(OPTIONAL_ENTRY_KEYS)}, got {sorted(keys)}")
+    return _local_dir(entry["local_dir"])
+
+
 def _hf_entry(entry, where: str) -> tuple[str, str]:
     if not isinstance(entry, dict):
         raise CheckpointError(f"{where} must be a mapping with repo_id and revision, got {entry!r}")
     keys = set(entry)
-    if keys != ENTRY_KEYS:
+    if not ENTRY_KEYS <= keys or not keys <= ENTRY_KEYS | OPTIONAL_ENTRY_KEYS:
         # A misspelt key ("revison") must not quietly become "no revision".
         raise CheckpointError(
-            f"{where} must have exactly the keys {sorted(ENTRY_KEYS)}, got {sorted(keys)}"
+            f"{where} must have the keys {sorted(ENTRY_KEYS)} and may add "
+            f"{sorted(OPTIONAL_ENTRY_KEYS)}, got {sorted(keys)}"
         )
     repo_id, revision = entry["repo_id"], entry["revision"]
     if not isinstance(repo_id, str) or not REPO_ID.fullmatch(repo_id):
@@ -83,6 +123,48 @@ def _hf_entry(entry, where: str) -> tuple[str, str]:
             f"{where}.revision must be a full 40-character commit hash, got {revision!r}"
         )
     return repo_id, revision
+
+
+def _entry_mode(entry, where: str) -> tuple[str | None, str | None]:
+    """The optional mode and statistics digest of one entry, both validated."""
+    mode = entry.get("mode")
+    if mode is not None:
+        if not isinstance(mode, str) or mode.strip().lower() not in MODES:
+            raise CheckpointError(f"{where}.mode must be one of {list(MODES)}, got {mode!r}")
+        mode = mode.strip().lower()
+    digest = entry.get("content_sha256")
+    if digest is not None:
+        if not isinstance(digest, str) or not CONTENT_SHA256.fullmatch(digest.strip().lower()):
+            raise CheckpointError(
+                f"{where}.content_sha256 must be a 64-character sha256, got {digest!r}")
+        digest = digest.strip().lower()
+        if mode != "required":
+            # A legacy checkpoint carries no statistics document to hash.
+            raise CheckpointError(
+                f"{where} gives content_sha256 but mode is {mode!r}; only a required-mode "
+                "entry has a statistics document to bind")
+    return mode, digest
+
+
+def _declared_modes(table: dict, per_task: dict) -> bool:
+    """Whether this table declares modes per entry -- all of them, or none.
+
+    A half-declared table is the dangerous shape: the entries without a mode
+    would silently take the config's single smolvla_task_normalization, which
+    under a mixed routing is by definition wrong for some task.
+    """
+    entries = [("checkpoints.default", table.get("default"))]
+    entries += [(f"checkpoints.tasks.{name}", value) for name, value in sorted(per_task.items())]
+    entries = [(where, value) for where, value in entries if isinstance(value, dict)]
+    with_mode = [where for where, value in entries if value.get("mode") is not None]
+    if not with_mode:
+        return False
+    without = [where for where, value in entries if value.get("mode") is None]
+    if without:
+        raise CheckpointError(
+            "either every checkpoint entry declares a mode or none does; "
+            f"{sorted(with_mode)} declare one and {sorted(without)} do not")
+    return True
 
 
 def _local_dir(value) -> Path:
@@ -119,14 +201,37 @@ def resolve_source(usr_args: dict, tasks: set[str] | None = None) -> CheckpointS
     if task not in tasks:
         raise CheckpointError(f"unknown task_name {task!r}")
 
-    if per_task.get(task) is not None:
-        where = f"checkpoints.tasks.{task}"
-        repo_id, revision = _hf_entry(per_task[task], where)
-        return CheckpointSource(origin=where, repo_id=repo_id, revision=revision)
-
+    # Validate every entry, not just the one this task lands on: a table that is
+    # half mode-declared must fail on any task, not only on the broken one.
+    declared = _declared_modes(table, per_task)
+    for name, value in sorted(per_task.items()):
+        if value is not None:
+            where = f"checkpoints.tasks.{name}"
+            _local_entry(value, where) if _is_local_entry(value) else _hf_entry(value, where)
+            _entry_mode(value, where)
     if table.get("default") is not None:
-        repo_id, revision = _hf_entry(table["default"], "checkpoints.default")
-        return CheckpointSource(origin="checkpoints.default", repo_id=repo_id, revision=revision)
+        default = table["default"]
+        _local_entry(default, "checkpoints.default") if _is_local_entry(default) \
+            else _hf_entry(default, "checkpoints.default")
+        _entry_mode(default, "checkpoints.default")
+    if declared and table.get("default") is not None and per_task:
+        # With per-task modes the routing must be spelt out task by task; a
+        # default would cover an unlisted task with a mode chosen for others.
+        raise CheckpointError(
+            "checkpoints.default cannot be combined with per-task modes: name every "
+            "task in checkpoints.tasks so each one's checkpoint and mode are explicit")
+
+    for where, entry in ((f"checkpoints.tasks.{task}", per_task.get(task)),
+                         ("checkpoints.default", table.get("default"))):
+        if entry is None:
+            continue
+        mode, digest = _entry_mode(entry, where)
+        if _is_local_entry(entry):
+            return CheckpointSource(origin=where, local_dir=_local_entry(entry, where),
+                                    mode=mode, content_sha256=digest)
+        repo_id, revision = _hf_entry(entry, where)
+        return CheckpointSource(origin=where, repo_id=repo_id, revision=revision,
+                                mode=mode, content_sha256=digest)
 
     raise CheckpointError(
         f"no checkpoint configured for task {task!r}: checkpoint_dir is empty, "

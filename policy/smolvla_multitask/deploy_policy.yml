@@ -40,13 +40,57 @@ eval_episode_seeds: null
 # ------------------------------------------------------------------
 checkpoint_dir: ""
 checkpoints:
-  # The shared multi-task model. Filled in once it is published.
+  # No default. With a per-task routing every task must be named, so an unlisted
+  # or misspelt task stops the run instead of being covered by a mode and a
+  # model chosen for other tasks.
   default: null
-  # Per-task overrides, e.g.
-  #   click_bell:
-  #     repo_id: org/name
-  #     revision: 0123456789abcdef0123456789abcdef01234567
-  tasks: {}
+  tasks:
+    # The frozen mapping (experiments/SUBMISSION_MAPPING.txt in the research
+    # repository): items_handover goes to this project's Q2-A checkpoint, which
+    # carries per-task statistics; the other nine stay on the official
+    # single-task checkpoints, which do not. Each entry declares its own mode,
+    # so there is no single smolvla_task_normalization for the two to share.
+    items_handover:
+      repo_id: PLACEHOLDER/SmolVLA_q2a_all10_taskstd_uniform_500k
+      revision: "0000000000000000000000000000000000000000"
+      mode: required
+      content_sha256: 36b048b902310a97fe0029d048071ffb1645453ef0c7032565b2382adbfbca14
+    table_rearrangement:
+      repo_id: RoboSynChallenge/SmolVLA_sim_table_rearrangement
+      revision: 913b29a7136876108a330aead1855309f985cbd8
+      mode: legacy
+    click_bell:
+      repo_id: RoboSynChallenge/SmolVLA_sim_click_bell
+      revision: 27965b7e2432f5a3084f2c60a04bff7c5a47b853
+      mode: legacy
+    water_pouring:
+      repo_id: RoboSynChallenge/SmolVLA_sim_water_pouring
+      revision: 2bf5d9c2d8d0b5820ba5c9fe6284c5ff8647561f
+      mode: legacy
+    handle_basket:
+      repo_id: RoboSynChallenge/SmolVLA_sim_handle_basket
+      revision: 0de9a93f124bd4ebe2fbd0d572ce3133806b82a9
+      mode: legacy
+    drawer_open_place:
+      repo_id: RoboSynChallenge/SmolVLA_sim_drawer_open_place
+      revision: c0088d84a568f93fb4401aabafcc41cf643efcdd
+      mode: legacy
+    mixer_operating:
+      repo_id: RoboSynChallenge/SmolVLA_sim_mixer_operating
+      revision: 42311ef3e795079caefee7a28f05c967caa870ac
+      mode: legacy
+    item_assembly:
+      repo_id: RoboSynChallenge/SmolVLA_sim_item_assembly
+      revision: db32020164ed2c7264804a5eb036a38a07d879ca
+      mode: legacy
+    manipulate_pipette:
+      repo_id: RoboSynChallenge/SmolVLA_sim_manipulate_pipette
+      revision: dd0e80bc7d5fa5081e1fa07f1b7115bad6dbffa0
+      mode: legacy
+    sample_loading:
+      repo_id: RoboSynChallenge/SmolVLA_sim_sample_loading
+      revision: 2a4f41ab3be8e5f544c890d6054bc8de3be5c53b
+      mode: legacy
 
 # ------------------------------------------------------------------
 # The VLM backbone, pinned like the checkpoints. A SmolVLA checkpoint names it
@@ -74,27 +118,28 @@ lerobot_root: ""
 smolvla_python: ""
 smolvla_cuda_visible_devices: 0
 smolvla_steps: 10
-# Which normalization the checkpoint was trained with. Declared here, never
-# inferred from whether a file happens to sit next to the weights.
+# Which normalization each checkpoint was trained with is declared per task, in
+# its checkpoints.tasks entry above -- never here as one scalar and never
+# inferred from whether task_normalization.json happens to sit next to the
+# weights. This submission routes one task to a checkpoint with per-task
+# statistics and nine to checkpoints without, so a single value would be wrong
+# for one group or the other; setting it alongside per-task modes is refused.
 #   legacy   -- Q1a and the official checkpoints: LeRobot's own normalizer only,
 #               and the gripper unit decided from the checkpoint's action.max.
 #               A checkpoint that carries task_normalization.json is refused:
 #               legacy would run it without its transform.
-#   required -- Q1c: the checkpoint carries per-task statistics in
+#   required -- the checkpoint carries per-task statistics in
 #               task_normalization.json, which are applied to the state and
 #               undone on the action, and which also state the gripper units.
-#               A missing file, an unknown task or a digest that does not match
-#               ends the run instead of guessing.
-# In required mode smolvla_rescale_gripper, smolvla_gripper_indices and
-# smolvla_gripper_source_range are refused: the statistics decide the units, and
-# a second conversion on top of them would look plausible and be wrong.
-smolvla_task_normalization: legacy
-smolvla_rescale_gripper: auto
-smolvla_gripper_indices: [6, 13]
-smolvla_gripper_source_range: [0.0, 1.0]
-# Stop executing the returned actions as soon as the task succeeds, as ACT and
-# DP do. false keeps the official behavior, which can overcount action steps by
-# up to smolvla_steps - 1.
+#               A missing file, an unknown task, a digest that does not match
+#               the entry's content_sha256 -- any of these ends the run.
+smolvla_task_normalization: null
+# Refused in required mode (the statistics decide the units there), so a mixed
+# routing cannot state them. Left unset, the legacy tasks take the same values
+# test_configs/official_baseline.yml spells out: [6, 13] and [0.0, 1.0], auto.
+smolvla_rescale_gripper: null
+smolvla_gripper_indices: null
+smolvla_gripper_source_range: null
 smolvla_check_success_each_step: false
 # If set to N, every call predicts a fresh chunk from the current observation
 # and executes only its first N actions (N <= chunk_size). null keeps the
