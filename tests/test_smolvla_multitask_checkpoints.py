@@ -33,7 +33,6 @@ except ImportError:  # pragma: no cover
 TASKS = {"click_bell", "handle_basket", "sample_loading"}
 REV_A = "a" * 40
 REV_B = "b" * 40
-Q2A_CONTENT_SHA256 = "36b048b902310a97fe0029d048071ffb1645453ef0c7032565b2382adbfbca14"
 OFFICIAL_TASKS = {
     "table_rearrangement", "click_bell", "water_pouring", "handle_basket", "items_handover",
     "drawer_open_place", "mixer_operating", "item_assembly", "manipulate_pipette", "sample_loading",
@@ -278,15 +277,17 @@ class ShippedConfigs(unittest.TestCase):
     def load(self, relative):
         return yaml.safe_load((POLICY_DIR / relative).read_text())
 
-    def test_submission_config_matches_the_frozen_mapping(self):
-        # The mapping was frozen on 2026-09-24 (experiments/SUBMISSION_MAPPING.txt
-        # in the research repository) after Q1d and the Q2-A checkpoint screen both
-        # failed the pre-declared admission rule: items_handover goes to this
-        # project's checkpoint, the other nine to the official ones. Naming the
-        # official checkpoints is therefore deliberate here -- but only task by
-        # task. What must never happen is one arriving through a default or a
-        # fallback, which would score the official model under this submission's
-        # name on a task nobody chose it for.
+    def test_submission_config_matches_the_final_mapping(self):
+        # The mapping was settled by holdout on 2026-09-26
+        # (experiments/holdout_DECISION.txt in the research repository): all ten
+        # tasks on the official single-task checkpoints. items_handover was the
+        # one task this project had chosen its own model for, on a 30-scene
+        # development result that a hundred untouched scenes did not reproduce.
+        #
+        # Naming the official checkpoints is therefore deliberate -- but only
+        # task by task. What must never happen is one arriving through a default
+        # or a fallback, which would score the official model under this
+        # submission's name on a task nobody chose it for.
         config = self.load("deploy_policy.yml")
         self.assertEqual(config["policy_name"], "smolvla_multitask")
         self.assertEqual(config["checkpoint_dir"], "")
@@ -295,14 +296,17 @@ class ShippedConfigs(unittest.TestCase):
         for task in sorted(OFFICIAL_TASKS):
             source = checkpoints.resolve_source({**config, "task_name": task})
             self.assertEqual(source.origin, f"checkpoints.tasks.{task}")
-            if task == "items_handover":
-                self.assertNotIn("SmolVLA_sim_", source.describe())
-                self.assertEqual(source.mode, "required")
-                self.assertEqual(source.content_sha256, Q2A_CONTENT_SHA256)
-            else:
-                self.assertEqual(source.repo_id, f"RoboSynChallenge/SmolVLA_sim_{task}")
-                self.assertEqual(source.mode, "legacy")
-                self.assertIsNone(source.content_sha256)
+            self.assertEqual(source.repo_id, f"RoboSynChallenge/SmolVLA_sim_{task}")
+            self.assertEqual(source.mode, "legacy")
+            self.assertIsNone(source.content_sha256)
+
+    def test_the_submission_pins_the_revisions_it_was_evaluated_at(self):
+        # The holdout numbers belong to these exact revisions; a branch name or a
+        # moved pin would make them describe something else.
+        submission = self.load("deploy_policy.yml")["checkpoints"]["tasks"]
+        baseline = self.load("test_configs/official_baseline.yml")["checkpoints"]["tasks"]
+        self.assertEqual({t: e["revision"] for t, e in submission.items()},
+                         {t: e["revision"] for t, e in baseline.items()})
 
     def test_submission_config_declares_no_global_mode_and_no_gripper_overrides(self):
         # One scalar cannot describe a routing where nine tasks are legacy and
@@ -313,14 +317,14 @@ class ShippedConfigs(unittest.TestCase):
                     "smolvla_gripper_source_range"):
             self.assertIsNone(config[key], key)
 
-    def test_submission_config_still_needs_the_published_checkpoint(self):
-        # Q2-A lives on our own disks; the graders cannot fetch a placeholder.
-        # This records the one edit the submission is still waiting on, and will
-        # start failing the moment the entry is filled in -- at which point the
-        # assertion below is the thing to delete.
-        entry = self.load("deploy_policy.yml")["checkpoints"]["tasks"]["items_handover"]
-        self.assertTrue(entry["repo_id"].startswith("PLACEHOLDER/"))
-        self.assertEqual(entry["revision"], "0" * 40)
+    def test_nothing_unpublished_is_shipped(self):
+        # There was a placeholder here while items_handover pointed at Q2-A,
+        # which is not published. The holdout sent that task back to the
+        # official checkpoint, so nothing in the submission is unpublished --
+        # and nothing may quietly become so again.
+        text = (POLICY_DIR / "deploy_policy.yml").read_text()
+        for marker in ("PLACEHOLDER", "0" * 40):
+            self.assertNotIn(marker, text)
 
     def test_a_local_entry_cannot_be_shipped(self):
         text = (POLICY_DIR / "deploy_policy.yml").read_text()

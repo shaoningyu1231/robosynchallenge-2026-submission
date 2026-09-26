@@ -133,27 +133,33 @@ class DeployConfigs(unittest.TestCase):
             return
         self.skipTest("no config routes a task in required mode")
 
-    def test_there_is_a_required_route_and_a_legacy_one(self):
+    def test_there_is_a_required_config_and_a_legacy_one(self):
+        # The submission ships ten legacy routes, but the required path is still
+        # live code and still has to be exercised by a config that declares it
+        # -- test_configs/q1c_taskstd.yml, which every task-conditioned
+        # evaluation in this project used.
         modes = {}
         for path in shipped_configs():
             config = yaml.safe_load(path.read_text()) or {}
-            for mode in set(modes_of(config).values()):
+            scalar = config.get("smolvla_task_normalization")
+            found = set(modes_of(config).values()) or ({str(scalar).lower()} if scalar else set())
+            for mode in found:
                 modes.setdefault(mode, []).append(path.name)
-        self.assertIn("legacy", modes, "Q1a and the official checkpoints need a legacy route")
-        self.assertIn("required", modes, "a task-conditioned checkpoint needs a required route")
+        self.assertIn("legacy", modes, "the official checkpoints need a legacy config")
+        self.assertIn("required", modes, "a task-conditioned checkpoint needs a required config")
 
-    def test_the_submission_config_is_the_frozen_mixed_routing(self):
-        # Nine tasks on the official legacy checkpoints, items_handover on this
-        # project's Q2-A -- the mapping frozen on 2026-09-24. A single scalar
-        # would be wrong for one group or the other, so there is none.
+    def test_the_submission_config_is_the_final_mapping(self):
+        # All ten on the official legacy checkpoints, settled by holdout on
+        # 2026-09-26. The scalar stays unset even though every entry now says
+        # the same thing: a scalar states the mode once, and a checkpoint that
+        # turned up carrying statistics would be run without them, while a
+        # per-task declaration refuses that one task.
         config = yaml.safe_load((CONFIG_DIR / "deploy_policy.yml").read_text())
         self.assertIsNone(config["smolvla_task_normalization"])
         resolved = modes_of(config)
         self.assertEqual(set(resolved), set(COMPETITION_TASKS))
-        self.assertEqual(resolved["items_handover"], "required")
         for task in COMPETITION_TASKS:
-            if task != "items_handover":
-                self.assertEqual(resolved[task], "legacy", task)
+            self.assertEqual(resolved[task], "legacy", task)
         # and nothing outside the ten is routed, mode or not
         for task in set(TASKS) - set(COMPETITION_TASKS):
             with self.assertRaises(checkpoints.CheckpointError):
