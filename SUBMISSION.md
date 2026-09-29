@@ -1,8 +1,10 @@
-# Submission: SmolVLA multi-task
+# Submission: official SmolVLA checkpoints, one per task, pinned
 
-> **Status: skeleton.** Items marked **TODO** must be filled in and verified
-> before this repository is submitted. The last valid submission is the one
-> evaluated, so only a version that passed the checks at the end is submitted.
+Every task is evaluated with the organisers' own released single-task SmolVLA
+checkpoint, each pinned to a full Hugging Face commit. This submission contains
+no self-trained weights and references none: no checkpoint of ours is included,
+downloaded or linked, and no weights are redistributed here. What it adds is the
+evaluation adapter that loads those checkpoints reproducibly (below).
 
 ## Run
 
@@ -14,100 +16,90 @@ bash policy/smolvla_multitask/setup_lerobot.sh
 bash policy/smolvla_multitask/eval.sh <task_name> <setting> <gpu_id> [--key value ...]
 ```
 
+The entrypoints are `policy/smolvla_multitask/eval.sh`,
+`policy/smolvla_multitask/deploy_policy.yml` and
+`policy/smolvla_multitask/deploy_policy.py`.
+
 ## Checkpoints
 
-Every task uses the checkpoint below unless it has its own row. Configured in
-`policy/smolvla_multitask/deploy_policy.yml`; all are public on Hugging Face.
+From `checkpoints.tasks` and `vlm` in
+[`policy/smolvla_multitask/deploy_policy.yml`](policy/smolvla_multitask/deploy_policy.yml),
+which is what the evaluation reads; this table is generated from that file and
+checked against it.
 
-| Task | Hugging Face checkpoint | Revision |
-|---|---|---|
-| all ten (default) | **TODO** (multi-task model, not yet published) | **TODO** |
+| Task | Hugging Face checkpoint | Revision | Mode |
+|---|---|---|---|
+| `items_handover` | `RoboSynChallenge/SmolVLA_sim_items_handover` | `fabe9462853965228e90e34bd517aa4e43bad323` | `legacy` |
+| `table_rearrangement` | `RoboSynChallenge/SmolVLA_sim_table_rearrangement` | `913b29a7136876108a330aead1855309f985cbd8` | `legacy` |
+| `click_bell` | `RoboSynChallenge/SmolVLA_sim_click_bell` | `27965b7e2432f5a3084f2c60a04bff7c5a47b853` | `legacy` |
+| `water_pouring` | `RoboSynChallenge/SmolVLA_sim_water_pouring` | `2bf5d9c2d8d0b5820ba5c9fe6284c5ff8647561f` | `legacy` |
+| `handle_basket` | `RoboSynChallenge/SmolVLA_sim_handle_basket` | `0de9a93f124bd4ebe2fbd0d572ce3133806b82a9` | `legacy` |
+| `drawer_open_place` | `RoboSynChallenge/SmolVLA_sim_drawer_open_place` | `c0088d84a568f93fb4401aabafcc41cf643efcdd` | `legacy` |
+| `mixer_operating` | `RoboSynChallenge/SmolVLA_sim_mixer_operating` | `42311ef3e795079caefee7a28f05c967caa870ac` | `legacy` |
+| `item_assembly` | `RoboSynChallenge/SmolVLA_sim_item_assembly` | `db32020164ed2c7264804a5eb036a38a07d879ca` | `legacy` |
+| `manipulate_pipette` | `RoboSynChallenge/SmolVLA_sim_manipulate_pipette` | `dd0e80bc7d5fa5081e1fa07f1b7115bad6dbffa0` | `legacy` |
+| `sample_loading` | `RoboSynChallenge/SmolVLA_sim_sample_loading` | `2a4f41ab3be8e5f544c890d6054bc8de3be5c53b` | `legacy` |
+| VLM backbone | `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` | `7b375e1b73b11138ff12fe22c8f2822d8fe03467` | — |
 
-## Base model
+- **Revision**: every entry is a full 40-character commit. The adapter downloads
+  exactly that commit, without logging in, and refuses a branch name or a short
+  hash.
+- **Mode** `legacy`: the normalization the official checkpoints were trained
+  with, applied as the organisers' own evaluation applies it. Each task declares
+  its mode beside its checkpoint (`policy/smolvla_multitask/checkpoints.py`).
+- There is no default entry: a task missing from the table stops the evaluation
+  instead of falling back to any other model.
+- The VLM backbone is pinned as well: a SmolVLA checkpoint names its backbone by
+  repo id only, so without the pin an empty cache would build the model on that
+  repository's current main.
 
-SmolVLA as built by LeRobot `b6ec0060` with `--policy.type=smolvla`: the
-vision-language backbone is `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` at
-revision `7b375e1b73b11138ff12fe22c8f2822d8fe03467`, truncated to 16 layers with
-the vision encoder frozen; the action expert is trained from scratch. No
-`smolvla_base` or other robot-pretrained weights. These fields match the
-`train_config.json` of the official `SmolVLA_sim_click_bell` checkpoint.
+## Data and training
 
-The backbone revision is enforced at evaluation, not only documented: the `vlm`
-entry of `deploy_policy.yml` pins it, and the worker loads it from that local
-snapshot with the Hub offline.
-
-## Data
-
-Only the official simulation datasets, 1000 episodes per task, at these revisions:
-
-| Dataset | Revision |
-|---|---|
-| RoboSynChallenge/cobotmagic_Sim_table_rearrangement | `ca14fdfbb9d39914f09b343e072618462bea97b8` |
-| RoboSynChallenge/cobotmagic_Sim_click_bell | `dd1f0de495cfec3240beaf2714f239168d5b3fae` |
-| RoboSynChallenge/cobotmagic_Sim_water_pouring | `932a287657983c41465d6c9baee5dd478ef61b90` |
-| RoboSynChallenge/cobotmagic_Sim_handle_basket | `c40819caabfea75e0724307845ddf5ee7f15ae8a` |
-| RoboSynChallenge/cobotmagic_Sim_items_handover | `20a88bf0bc3fe3a1ae58ad97ed60a06c3431684a` |
-| RoboSynChallenge/cobotmagic_Sim_drawer_open_place | `6fdf6ee1ed74bbbbc0216d507c8a19c8994a15c3` |
-| RoboSynChallenge/cobotmagic_Sim_mixer_operating | `fe5428c644932747b1109da98c6dc79a1caabd51` |
-| RoboSynChallenge/cobotmagic_Sim_item_assembly | `033856dc40f698d9b4c82b87e00c8d171d92b925` |
-| RoboSynChallenge/cobotmagic_Sim_manipulate_pipette | `168885aec78256de14e0c130ea12a6ba43e714a7` |
-| RoboSynChallenge/cobotmagic_Sim_sample_loading | `67208f9ba05f2f29a77b9c5e7b64acf26c3b3c44` |
-
-No real-robot data, no self-generated data, no external datasets.
-
-Before merging the ten datasets into one (10000 episodes, 2,808,794 frames, 25 fps):
-
-- feature and joint names unified (`observation.state`, `observation.images.cam_high`
-  / `cam_left_wrist` / `cam_right_wrist`, `LEFT_JOINT1..7`, `RIGHT_JOINT1..7`)
-- only `action`, `observation.state`, `observation.qvel`, `observation.qf` and the
-  three cameras kept; object pose, contact and end-effector pose features dropped
-  (the evaluation does not provide them)
-- `table_rearrangement` gripper actions (dimensions 6 and 13) multiplied by 20,
-  from metres (0–0.05) to the 0–1 opening fraction every other task uses
-- joint columns stored as float32 vectors of length 14 (some tasks stored float64)
-- converted from LeRobot v2.1 to v3.0
-
-Every task keeps its official language instruction verbatim.
-**TODO**: decide whether the dataset scripts ship in this repository or are linked.
-
-## Training
-
-`lerobot-train` through `policy/smolvla/finetune.sh`, on one RTX 5090:
-
-| | |
-|---|---|
-| steps / batch size | 200,000 / 32 |
-| optimizer | AdamW, peak lr 1e-4 |
-| schedule | warmup 4,000 steps, cosine decay to 2.5e-6 at 120,000, constant after |
-| seed | 1000 |
-| image augmentation | off |
-
-The official checkpoints use 50,000 steps, warmup 1,000 and decay 30,000; the
-schedule here is the same curve stretched four times. Sampling is per frame, so
-tasks are seen in proportion to their frame counts (`click_bell` 2.6%,
-`drawer_open_place` 15.1%).
+None. This submission trains nothing and uses no data of its own; the
+checkpoints above are the organisers' releases, unchanged.
 
 ## Changes to upstream
 
 Based on RoboSynChallenge `cccbbc99235add09c9bb41f0eef14f4ed0e89906`. All changes
 are committed here; nothing needs to be patched at evaluation time.
 
-- `policy/smolvla_multitask/` — the submitted policy (new)
+- `policy/smolvla_multitask/` — the submitted policy adapter (new): checkpoint
+  resolution and pinning (`checkpoints.py`, `fetch_checkpoint.py`), the worker,
+  per-episode flow-matching noise seeding (`noise_seed.py`), normalization modes
+  (`task_norm.py`), the pinned LeRobot environment (`setup_lerobot.sh`,
+  `requirements.lock`) and `eval.sh`
 - `policy/smolvla/deploy_policy.py`, `smolvla_worker.py` — `eval()` returns the four
   values `scripts/eval_policy.py` unpacks; camera frames cast to float32 before
   the policy; fallback when LeRobot lacks the processor converters
+- `policy/smolvla/deploy_policy.yml` — two options, both off by default so the
+  official behavior is kept (`smolvla_check_success_each_step: false`,
+  `smolvla_replan_steps: null`)
 - `policy/smolvla/finetune.sh` — empty `rename_map` by default (required with
-  `--policy.type` on current LeRobot)
+  `--policy.type` on current LeRobot); not used by this submission
+- `.gitignore` — the LeRobot checkout and venv that `setup_lerobot.sh` builds
 - `scripts/eval_policy.py` — drains the simulator cleanup queue after
   `env.close()`, and writes `evaluation_metrics.json` before teardown so a crash
-  in teardown cannot lose completed episodes
+  in teardown cannot lose completed episodes; optional frozen episode seeds for
+  our own comparisons (off by default: `eval_episode_seeds: null` keeps the
+  organisers' protocol)
+- `tests/` — tests for all of the above
 
 ## Verified
 
-**TODO** — record for the submitted commit, from a fresh clone of this repository:
+Final acceptance, 2026-09-26, on commit `f10ba96861af89f1dfc24eb1afdae51bf6ca4e2c`
+(tree `1a8c995617cb4470c8fe046e97017b7bf7d5af0e`; `deploy_policy.yml` sha256
+`32c052abcc21a4121bbee41a57beaac224e1048897dd210fd271b3531f2abee9`). All passed:
 
-- [ ] empty Hugging Face cache, not logged in: checkpoint downloads, 1 task × 3 episodes
-- [ ] `--checkpoint_dir <local dir>`: 1 task × 3 episodes
-- [ ] exit code 0, `evaluation_metrics.json` present with the right episode count
-- [ ] metrics list accepted seeds (`episodes[].seed`) and skipped seeds
-- [ ] no leftover processes or GPU memory after the run
+- [x] fresh clone of the branch, tree identical to the commit, clone clean
+- [x] full test suite inside the clean clone (123 passed)
+- [x] each of the ten tasks: one real reset and inference, each loading its own pinned revision
+- [x] `evaluation_metrics.json` checked field by field: task, checkpoint, mode, revision
+- [x] four invalid configurations rejected before the worker starts (unknown task; a
+      required-mode declaration on an official checkpoint; a required checkpoint whose
+      statistics digest was changed; a checkpoint carrying statistics declared legacy)
+- [x] empty Hugging Face cache, not logged in, this configuration itself: downloads and evaluates
+- [x] local checkpoint directory (`--checkpoint_dir`)
+- [x] two runs accept and skip the same episode seeds; no leftover processes; GPU memory back to zero
+
+The commit that carries this file changes `SUBMISSION.md` only; the code, the
+configuration and the entrypoints are byte-identical to the accepted commit above.
