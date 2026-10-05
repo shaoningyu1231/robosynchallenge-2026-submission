@@ -8,6 +8,8 @@ import etils.epath as epath
 import flax.nnx as nnx
 from flax.training import common_utils
 import flax.traverse_util as traverse_util
+import time
+
 import jax
 import jax.experimental
 import jax.numpy as jnp
@@ -68,6 +70,16 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
 
     if log_code:
         wandb.run.log_code(epath.Path(__file__).parent.parent)
+
+
+def _research_digest(tree) -> str:
+    """Research (B0): sha256 over every leaf's float32 bytes, in tree order (resume check)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for leaf in jax.tree.leaves(jax.device_get(tree)):
+        h.update(np.asarray(leaf, dtype=np.float32).tobytes())
+    return h.hexdigest()[:16]
 
 
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
@@ -217,10 +229,14 @@ def main(config: _config.TrainConfig):
     )
     init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
 
+    # Research (B0): a resumed run starts its sampler at the step it resumes from (the checkpoint labelled s holds the
+    # state after step s, i.e. train_state.step == s + 1).
+    research_start = (checkpoint_manager.latest_step() + 1) if resuming else 0
     data_loader = _data_loader.create_data_loader(
         config,
         sharding=data_sharding,
         shuffle=True,
+        start_step=research_start,
     )
     data_iter = iter(data_loader)
     batch = next(data_iter)
@@ -239,6 +255,9 @@ def main(config: _config.TrainConfig):
 
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
+        if int(train_state.step) != research_start:
+            raise RuntimeError(f"restored step {int(train_state.step)} != sampler start {research_start}")
+        logging.info(f"RESEARCH_RESUME step={int(train_state.step)} opt_state={_research_digest(train_state.opt_state)}")
 
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
@@ -256,21 +275,28 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+    research_t, research_n = time.time(), 0
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
         infos.append(info)
+        research_n += 1
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
+            jax.block_until_ready(train_state.step)
+            peak = jax.devices()[0].memory_stats().get("peak_bytes_in_use", 0)
+            pbar.write(f"RESEARCH_STEP step={step} peak_gb={peak / 1e9:.2f} s_per_step={(time.time() - research_t) / research_n:.3f}")
+            research_t, research_n = time.time(), 0
             wandb.log(reduced_info, step=step)
             infos = []
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            logging.info(f"RESEARCH_SAVE label={step} step={int(train_state.step)} opt_state={_research_digest(train_state.opt_state)}")
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()

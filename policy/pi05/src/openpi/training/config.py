@@ -90,6 +90,14 @@ class DataConfig:
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
 
+    # Research (B0): frames between an observation and the first action of its chunk. 0 keeps the original behaviour.
+    action_offset: int = 0
+    # Research (B0): restrict the LeRobot dataset to these episodes (None: all), e.g. for the overfit test.
+    episodes: Sequence[int] | None = None
+    # Research (B0): sample with StepIndexedSampler (batch k is a function of seed, batch size and k only), so that a
+    # resumed run continues with the batch the interrupted one would have taken next. False keeps torch's shuffle.
+    step_indexed_sampler: bool = False
+
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
     # Action space for DROID dataset.
@@ -353,6 +361,65 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=model_transforms,
         )
+
+@dataclasses.dataclass(frozen=True)
+class SetPrompt(_transforms.DataTransformFn):
+    """Research (B0): replaces the dataset's task text with an explicit prompt (training side only; the inference
+    adapter must send the same text)."""
+
+    prompt: str
+
+    def __call__(self, data: dict) -> dict:
+        return {**data, "prompt": self.prompt}
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotRoboSynV21DataConfig(DataConfigFactory):
+    """Research (B0): RoboSynChallenge LeRobot v2.1 datasets with the keys they actually store.
+
+    The bundled LeRobotEmbodiChainDataConfig repacks "cam_high.color" / "observation.qpos" (not in these datasets) and
+    leaves action_sequence_keys at the default "actions" (the datasets store "action"). Same data and model transforms
+    otherwise: EmbodiChainInputs / Outputs, joints as deltas to the current state (make_bool_mask(6, -1, 6, -1)),
+    grippers absolute, pi0 model transforms. Pose, qvel and qf columns are not repacked, so they never reach the model.
+    """
+
+    # None: the dataset's own task text (the organisers' wording); a string: that prompt instead (an explicit variant).
+    prompt_override: str | None = None
+    action_offset: int = 1
+    episodes: Sequence[int] | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack = [
+            _transforms.RepackTransform(
+                {
+                    "observation/image": "observation.images.cam_high",
+                    "observation/left_wrist_image": "observation.images.cam_left_wrist",
+                    "observation/right_wrist_image": "observation.images.cam_right_wrist",
+                    "observation/state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                }
+            )
+        ]
+        if self.prompt_override is not None:
+            repack.append(SetPrompt(self.prompt_override))
+        mask = _transforms.make_bool_mask(6, -1, 6, -1)
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.EmbodiChainInputs(model_type=model_config.model_type), _transforms.DeltaActions(mask)],
+            outputs=[_transforms.AbsoluteActions(mask), libero_policy.EmbodiChainOutputs()],
+        )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=_transforms.Group(inputs=repack),
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=("action",),
+            action_offset=self.action_offset,
+            episodes=None if self.episodes is None else tuple(self.episodes),
+            step_indexed_sampler=True,
+        )
+
 
 @dataclasses.dataclass(frozen=True)
 class LeRobotEmbodiChainDataConfig(DataConfigFactory):
@@ -822,6 +889,130 @@ _CONFIGS = [
     #
     # Fine-tuning EmbodiChain configs.
     #
+    # Research (B0): pi0 (not pi05) LoRA on drawer_open_place, from the local, verified pi0_base checkpoint.
+    TrainConfig(
+        name="pi0_drawer_lora_research",
+        exp_name="b0",
+        model=pi0_config.Pi0Config(
+            action_horizon=50, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ),
+        data=LeRobotRoboSynV21DataConfig(
+            repo_id="RoboSynChallenge/cobotmagic_Sim_drawer_open_place",
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/root/autodl-fs/openpi_assets/checkpoints/pi0_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        assets_base_dir="/root/autodl-fs/b0/assets",
+        checkpoint_base_dir="/root/autodl-fs/b0/checkpoints",
+        batch_size=1,
+        num_train_steps=500,
+        log_interval=10,
+        save_interval=100,
+        keep_period=None,
+        wandb_enabled=False,
+        num_workers=4,
+    ),
+    # Research (B1): the first formal run, recipe experiments/B1_RECIPE.txt. Every training-relevant field is explicit.
+    TrainConfig(
+        name="pi0_drawer_lora_b1_tomato",
+        exp_name="b1_tomato",
+        model=pi0_config.Pi0Config(
+            action_horizon=50, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ),
+        data=LeRobotRoboSynV21DataConfig(
+            repo_id="RoboSynChallenge/cobotmagic_Sim_drawer_open_place",
+            base_config=DataConfig(prompt_from_task=True),
+            prompt_override=None,   # the organisers' text ("tomato"), identical to the evaluator's instruction
+            action_offset=1,
+            assets=AssetsConfig(assets_dir="/root/autodl-fs/b0/assets/pi0_drawer_lora_research"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/root/autodl-fs/openpi_assets/checkpoints/pi0_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-8, weight_decay=1e-10, clip_gradient_norm=1.0),
+        seed=42,
+        batch_size=32,
+        num_train_steps=5_000,
+        log_interval=10,
+        save_interval=1_000,
+        keep_period=1_000,
+        num_workers=16,
+        assets_base_dir="/root/autodl-fs/b1/assets",
+        checkpoint_base_dir="/root/autodl-fs/b1/checkpoints",
+        wandb_enabled=False,
+    ),
+    # Research (B2): pipette, the B1 recipe (experiments/B1_RECIPE.txt) unchanged except the task data and normalizer,
+    # the run name / directories, 16k steps and the saves (10000 and the last step only). From pi0_base, not from drawer.
+    TrainConfig(
+        name="pi0_pipette_lora_b2",
+        exp_name="b2_pipette",
+        model=pi0_config.Pi0Config(
+            action_horizon=50, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ),
+        data=LeRobotRoboSynV21DataConfig(
+            repo_id="RoboSynChallenge/cobotmagic_Sim_manipulate_pipette",
+            base_config=DataConfig(prompt_from_task=True),
+            prompt_override=None,   # the organisers text, identical to the evaluator instruction (checked 2026-10-04)
+            action_offset=1,        # same pairing as drawer (tools/b2_offset_check.py, 2026-10-04)
+            assets=AssetsConfig(assets_dir="/root/autodl-fs/b2/assets/pi0_pipette_lora_b2"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/root/autodl-fs/openpi_assets/checkpoints/pi0_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-8, weight_decay=1e-10, clip_gradient_norm=1.0),
+        seed=42,
+        batch_size=32,
+        num_train_steps=16_000,
+        log_interval=10,
+        save_interval=10_000,
+        keep_period=10_000,
+        num_workers=16,
+        assets_base_dir="/root/autodl-fs/b2/assets",
+        checkpoint_base_dir="/root/autodl-fs/b2/checkpoints",
+        wandb_enabled=False,
+    ),
+    # Research (B2): item_assembly, the B1 recipe (experiments/B1_RECIPE.txt) unchanged except the task data and normalizer,
+    # the run name / directories, 16k steps and the saves (10000 and the last step only). From pi0_base, not from drawer.
+    TrainConfig(
+        name="pi0_item_assembly_lora_b2",
+        exp_name="b2_item_assembly",
+        model=pi0_config.Pi0Config(
+            action_horizon=50, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ),
+        data=LeRobotRoboSynV21DataConfig(
+            repo_id="RoboSynChallenge/cobotmagic_Sim_item_assembly",
+            base_config=DataConfig(prompt_from_task=True),
+            prompt_override=None,   # the organisers text, identical to the evaluator instruction (checked 2026-10-04)
+            action_offset=1,        # same pairing as drawer (tools/b2_offset_check.py, 2026-10-04; arm error 0.0078 at k=0, larger than drawer)
+            assets=AssetsConfig(assets_dir="/root/autodl-fs/b2/assets/pi0_item_assembly_lora_b2"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/root/autodl-fs/openpi_assets/checkpoints/pi0_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-8, weight_decay=1e-10, clip_gradient_norm=1.0),
+        seed=42,
+        batch_size=32,
+        num_train_steps=16_000,
+        log_interval=10,
+        save_interval=10_000,
+        keep_period=10_000,
+        num_workers=16,
+        assets_base_dir="/root/autodl-fs/b2/assets",
+        checkpoint_base_dir="/root/autodl-tmp/b2/checkpoints",  # trainbox2 local data disk,
+        wandb_enabled=False,
+    ),
     TrainConfig(
         name="pi0_base_robosynchallenge_full",
         model=pi0_config.Pi0Config(action_horizon=50),

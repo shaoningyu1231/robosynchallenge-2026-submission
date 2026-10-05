@@ -140,8 +140,12 @@ def create_torch_dataset(
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
+        episodes=None if data_config.episodes is None else list(data_config.episodes),
         delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            # research (B0): action_offset shifts the chunk; the RoboSyn recorder pairs each observation with the
+            # command that produced it, so the next command after observation t is action t+1 (experiments/B0_RECORD.txt 5)
+            key: [(t + data_config.action_offset) / dataset_meta.fps for t in range(action_horizon)]
+            for key in data_config.action_sequence_keys
         },
     )
 
@@ -228,6 +232,7 @@ def create_data_loader(
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"] = "jax",
+    start_step: int = 0,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
 
@@ -265,6 +270,7 @@ def create_data_loader(
         seed=config.seed,
         skip_norm_stats=skip_norm_stats,
         framework=framework,
+        start_step=start_step,
     )
 
 
@@ -281,6 +287,7 @@ def create_torch_data_loader(
     num_workers: int = 0,
     seed: int = 0,
     framework: str = "jax",
+    start_step: int = 0,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
 
@@ -320,6 +327,9 @@ def create_torch_data_loader(
             local_batch_size = batch_size
     else:
         local_batch_size = batch_size // jax.process_count()
+        if shuffle and data_config.step_indexed_sampler:
+            sampler = StepIndexedSampler(len(dataset), local_batch_size, seed, start_step)
+            logging.info(f"StepIndexedSampler: {len(dataset)} items, batch {local_batch_size}, seed {seed}, start step {start_step}")
 
     logging.info(f"local_batch_size: {local_batch_size}")
     data_loader = TorchDataLoader(
@@ -376,6 +386,36 @@ def create_rlds_data_loader(
     )
 
     return DataLoaderImpl(data_config, data_loader)
+
+
+class StepIndexedSampler(torch.utils.data.Sampler):
+    """Research (B0): an endless sample stream in which batch k is fixed by (seed, batch size, k).
+
+    The stream is epoch after epoch of numpy permutations seeded with (seed, epoch); with drop_last batching, batch k is
+    stream[k * batch_size : (k + 1) * batch_size]. Starting at start_step skips start_step * batch_size indices (no data
+    is loaded for them), so a resumed run takes exactly the batch the interrupted run would have taken next.
+    """
+
+    def __init__(self, num_items: int, batch_size: int, seed: int, start_step: int = 0):
+        self.num_items, self.batch_size, self.seed, self.start_step = int(num_items), int(batch_size), int(seed), int(start_step)
+
+    def stream(self):
+        epoch = 0
+        while True:
+            yield from np.random.default_rng([self.seed, epoch]).permutation(self.num_items).tolist()
+            epoch += 1
+
+    def batch_indices(self, step: int) -> list[int]:
+        it = self.stream()
+        for _ in range(step * self.batch_size):
+            next(it)
+        return [next(it) for _ in range(self.batch_size)]
+
+    def __iter__(self):
+        it = self.stream()
+        for _ in range(self.start_step * self.batch_size):
+            next(it)
+        yield from it
 
 
 class TorchDataLoader:
