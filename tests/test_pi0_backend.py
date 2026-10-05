@@ -131,6 +131,11 @@ class ServerLifecycle(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
+        # This is a stand-in process, not a pi05 model. Its cwd must not depend
+        # on a JAX checkout existing on the machine running these unit tests.
+        saved_cwd = B.PI05_DIR
+        B.PI05_DIR = root
+        self.addCleanup(setattr, B, "PI05_DIR", saved_cwd)
         self.python = root / "python"
         self.python.write_text(FAKE_SERVER)
         self.python.chmod(self.python.stat().st_mode | stat.S_IXUSR)

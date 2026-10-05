@@ -70,7 +70,9 @@ def modes_of(config: dict) -> dict:
             source = checkpoints.resolve_source({**config, "task_name": task})
         except checkpoints.CheckpointError:
             continue
-        resolved[task] = task_norm.resolve_mode(config, source.mode)
+        # get_model dispatches pi0 before SmolVLA's normalization guard. pi0
+        # uses its own checkpoint assets; assigning it a SmolVLA mode is wrong.
+        resolved[task] = "pi0" if source.backend == "pi0" else task_norm.resolve_mode(config, source.mode)
     return resolved
 
 
@@ -82,6 +84,20 @@ def shipped_configs():
 
 @unittest.skipIf(yaml is None, "PyYAML is not installed here")
 class DeployConfigs(unittest.TestCase):
+    def test_pi0_local_config_keeps_nine_legacy_routes_and_own_assets(self):
+        config = yaml.safe_load((CONFIG_DIR / "test_configs/pi0_drawer_local.yml").read_text())
+        resolved = modes_of(config)
+        self.assertEqual(resolved["drawer_open_place"], "pi0")
+        self.assertEqual(set(resolved), set(COMPETITION_TASKS))
+        for task in set(COMPETITION_TASKS) - {"drawer_open_place"}:
+            self.assertEqual(resolved[task], "legacy", task)
+
+    def test_pi0_cannot_be_assigned_a_smolvla_mode(self):
+        config = yaml.safe_load((CONFIG_DIR / "test_configs/pi0_drawer_local.yml").read_text())
+        config["checkpoints"]["tasks"]["drawer_open_place"]["mode"] = "legacy"
+        with self.assertRaises(checkpoints.CheckpointError):
+            checkpoints.resolve_source({**config, "task_name": "drawer_open_place"})
+
     def test_every_config_declares_a_mode_exactly_one_way(self):
         for path in shipped_configs():
             with self.subTest(config=path.name):
@@ -100,13 +116,18 @@ class DeployConfigs(unittest.TestCase):
                     tasks = (config.get("checkpoints") or {}).get("tasks") or {}
                     self.assertTrue(tasks, "a config without a scalar must route per task")
                     for task, entry in tasks.items():
+                        if entry.get("backend", "smolvla") == "pi0":
+                            self.assertNotIn("mode", entry, "pi0 must not use SmolVLA normalization")
+                            self.assertTrue(entry.get("pi0_config"), "pi0 requires its own transform config")
+                            self.assertEqual(resolved.get(task), "pi0")
+                            continue
                         self.assertIn(entry.get("mode"), ("legacy", "required"),
                                       f"{path.name}: {task} declares no mode")
                 else:
                     # A scalar config may route nothing at all (the research
                     # configs take --checkpoint_dir on the command line); what
                     # it must not do is route something under another mode.
-                    self.assertLessEqual(set(resolved.values()), {str(scalar).lower()})
+                    self.assertLessEqual(set(resolved.values()) - {"pi0"}, {str(scalar).lower()})
                     self.assertEqual(task_norm.resolve_mode(config), str(scalar).lower())
 
     def test_required_routes_pass_the_adapters_own_guard(self):

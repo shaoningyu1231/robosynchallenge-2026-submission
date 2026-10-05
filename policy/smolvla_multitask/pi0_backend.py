@@ -140,12 +140,11 @@ class Pi0Server:
                    OPENPI_DATA_HOME=str(self.data_home), PYTHONUNBUFFERED="1",
                    PI0_EVALUATOR_PID=str(os.getpid()))
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = open(self.log_path, "ab")
         cmd = [self.python, str(SERVE_SCRIPT), "--port", str(self.port), "policy:checkpoint",
                "--policy.config", self.config, "--policy.dir", str(self.checkpoint_dir)]
-        self.proc = subprocess.Popen(cmd, cwd=PI05_DIR, env=env, stdout=log, stderr=subprocess.STDOUT,
-                                     stdin=subprocess.DEVNULL, start_new_session=True)
-        log.close()
+        with self.log_path.open("ab") as log:
+            self.proc = subprocess.Popen(cmd, cwd=PI05_DIR, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                         stdin=subprocess.DEVNULL, start_new_session=True)
         atexit.register(self.stop)
         deadline = time.time() + START_TIMEOUT_S
         while time.time() < deadline:
