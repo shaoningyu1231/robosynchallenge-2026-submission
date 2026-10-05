@@ -36,7 +36,14 @@ FAKE_SERVER = textwrap.dedent("""\
         print("the model failed to load", flush=True)
         sys.exit(3)
     port = int(sys.argv[sys.argv.index("--port") + 1])
-    child = subprocess.Popen(["sleep", "300"])
+    if os.environ.get("FAKE_CHILD_IGNORE"):
+        child = subprocess.Popen([sys.executable, "-c", "import os,signal,time; "
+                                 "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                                 "open(os.environ['FAKE_PIDS']+'.ready','w').write('ready'); time.sleep(300)"])
+        while not os.path.exists(os.environ["FAKE_PIDS"]+'.ready'):
+            time.sleep(0.01)
+    else:
+        child = subprocess.Popen(["sleep", "300"])
     open(os.environ["FAKE_PIDS"], "w").write(f"{os.getpid()} {child.pid} {os.environ['CUDA_VISIBLE_DEVICES']} "
                                              f"{os.environ['XLA_PYTHON_CLIENT_PREALLOCATE']}")
     s = socket.socket()
@@ -151,6 +158,34 @@ class ServerLifecycle(unittest.TestCase):
             self.server.start()
         self.assertIn("the model failed to load", str(cm.exception))
         self.assertIsNone(self.server.proc)
+
+    def test_child_ignoring_sigterm_is_killed_even_after_leader_exits(self):
+        os.environ["FAKE_CHILD_IGNORE"] = "1"
+        self.addCleanup(os.environ.pop, "FAKE_CHILD_IGNORE", None)
+        saved = B.STOP_GRACE_S
+        B.STOP_GRACE_S = 0.2
+        self.addCleanup(setattr, B, "STOP_GRACE_S", saved)
+        self.server.start()
+        pid, child, _, _ = self.pids.read_text().split()
+        self.server.stop()
+        self.assertFalse(alive(int(pid)))
+        self.assertFalse(alive(int(child)), "SIGTERM killed only the leader, not its child")
+        self.assertFalse(B.Pi0Server._group_alive(int(pid)))
+
+    def test_stop_still_finds_children_after_leader_already_exited(self):
+        import signal
+        os.environ["FAKE_CHILD_IGNORE"] = "1"
+        self.addCleanup(os.environ.pop, "FAKE_CHILD_IGNORE", None)
+        saved = B.STOP_GRACE_S
+        B.STOP_GRACE_S = 0.2
+        self.addCleanup(setattr, B, "STOP_GRACE_S", saved)
+        self.server.start()
+        pid, child, _, _ = self.pids.read_text().split()
+        os.kill(int(pid), signal.SIGTERM)
+        self.server.proc.wait(timeout=5)
+        self.assertTrue(alive(int(child)))
+        self.server.stop()
+        self.assertFalse(alive(int(child)))
 
     def test_a_missing_environment_is_named(self):
         self.server.python = str(Path(self.tmp.name) / "nope" / "python")

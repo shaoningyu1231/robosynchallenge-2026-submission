@@ -17,6 +17,7 @@ parent pid changes), so a killed evaluation never leaves a model on the GPU.
 import hashlib
 import logging
 import os
+import signal
 import socket
 import sys
 import threading
@@ -66,14 +67,25 @@ class NoisePolicy:
 
 
 def watch_parent(interval_s: float = 2.0) -> None:
-    parent = os.getppid()
+    # Captured by the evaluator before Popen: if it dies while heavy imports
+    # run, getppid() is already 1 and cannot identify the original parent.
+    parent = int(os.environ.get("PI0_EVALUATOR_PID", os.getppid()))
+
+    def end_orphan():
+        # Only kill our own session/group, never a manually launched shell's.
+        if os.getpgrp() == os.getpid():
+            os.killpg(os.getpgrp(), signal.SIGKILL)
+        os._exit(0)
+
+    if os.getppid() != parent:
+        end_orphan()
 
     def loop():
         while True:
             time.sleep(interval_s)
             if os.getppid() != parent:
                 logging.warning("the evaluator (pid %s) is gone; stopping the pi0 server", parent)
-                os._exit(0)
+                end_orphan()
 
     threading.Thread(target=loop, daemon=True, name="parent-watchdog").start()
 

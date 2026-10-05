@@ -58,6 +58,7 @@ REQUIRED_FILES = ("params/_METADATA", "params/manifest.ocdbt")
 PI0_STEP = 10
 START_TIMEOUT_S = 600
 STOP_GRACE_S = 30
+STOP_KILL_S = 10
 NOISE_KEY = "research/noise"
 NOISE_DERIVATION = ("seed = int.from_bytes(sha256(f'pi0-noise:{base}:{env_seed}:{call}').digest()[:8], 'big') & (2**63 - 1); "
                     "noise = numpy.random.Generator(PCG64(seed)).standard_normal((action_horizon, action_dim), float32); "
@@ -136,7 +137,8 @@ class Pi0Server:
         self.port = _free_port()
         env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "CUDA_VISIBLE_DEVICES", "VIRTUAL_ENV")}
         env.update(CUDA_VISIBLE_DEVICES=str(self.gpu_id), XLA_PYTHON_CLIENT_PREALLOCATE="false",
-                   OPENPI_DATA_HOME=str(self.data_home), PYTHONUNBUFFERED="1")
+                   OPENPI_DATA_HOME=str(self.data_home), PYTHONUNBUFFERED="1",
+                   PI0_EVALUATOR_PID=str(os.getpid()))
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         log = open(self.log_path, "ab")
         cmd = [self.python, str(SERVE_SCRIPT), "--port", str(self.port), "policy:checkpoint",
@@ -170,22 +172,35 @@ class Pi0Server:
         proc = self.proc
         if proc is None:
             return
-        try:
-            pgid = os.getpgid(proc.pid)
-        except ProcessLookupError:
-            pgid = None
-        if pgid is not None:
-            for sig, wait_s in ((signal.SIGTERM, STOP_GRACE_S), (signal.SIGKILL, 10)):
-                try:
-                    os.killpg(pgid, sig)
-                except ProcessLookupError:
+        # start_new_session=True makes the server PID its PGID. Do not look the
+        # PGID up after the leader exited: its children can still be alive.
+        pgid = proc.pid
+        for sig, wait_s in ((signal.SIGTERM, STOP_GRACE_S), (signal.SIGKILL, STOP_KILL_S)):
+            proc.poll()  # reap the leader if it already exited
+            if not self._group_alive(pgid):
+                break
+            try:
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                break
+            deadline = time.monotonic() + wait_s
+            while time.monotonic() < deadline:
+                proc.poll()
+                if not self._group_alive(pgid):
                     break
-                try:
-                    proc.wait(timeout=wait_s)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
+                time.sleep(0.05)
+        proc.poll()
+        if self._group_alive(pgid):
+            raise Pi0Error(f"pi0 server process group {pgid} survived SIGKILL; cleanup incomplete")
         self.proc = None
+
+    @staticmethod
+    def _group_alive(pgid: int) -> bool:
+        # killpg(pgid, 0) also counts orphan zombies. Zombies cannot retain a
+        # CUDA context; inspect the whole group and count live members only.
+        rows = subprocess.check_output(["ps", "-axo", "pgid=,stat="], text=True)
+        return any(len(parts) == 2 and int(parts[0]) == pgid and not parts[1].startswith("Z")
+                   for parts in (line.split() for line in rows.splitlines()))
 
 
 class Pi0Model:
