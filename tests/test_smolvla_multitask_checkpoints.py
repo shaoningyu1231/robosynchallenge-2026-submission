@@ -213,6 +213,65 @@ class PerTaskMode(unittest.TestCase):
         self.assertIn("checkpoints.tasks.handle_basket.mode", str(cm.exception))
 
 
+class Pi0Backend(unittest.TestCase):
+    """A task routed to pi0 (backend: pi0): its own keys, outside SmolVLA's mode rule, never the default."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.local = Path(self.tmp.name) / "pi0"
+        self.local.mkdir()
+
+    def table(self, **tasks):
+        return {"checkpoints": {"default": None, "tasks": tasks}}
+
+    def pi0(self, **extra):
+        return {**entry(repo="team/pi0_drawer"), "backend": "pi0", "pi0_config": "pi0_drawer_lora_b1_tomato", **extra}
+
+    def test_a_pi0_entry_beside_mode_declaring_smolvla_entries(self):
+        config = self.table(click_bell=self.pi0(), handle_basket={**entry(), "mode": "legacy"})
+        source = resolve(task_name="click_bell", **config)
+        self.assertEqual((source.backend, source.pi0_config, source.repo_id), ("pi0", "pi0_drawer_lora_b1_tomato", "team/pi0_drawer"))
+        self.assertIsNone(source.mode)
+        other = resolve(task_name="handle_basket", **config)
+        self.assertEqual((other.backend, other.pi0_config, other.mode), ("smolvla", None, "legacy"))
+
+    def test_a_local_pi0_entry(self):
+        config = self.table(click_bell={"local_dir": str(self.local), "backend": "pi0", "pi0_config": "pi0_x_lora_b2"})
+        source = resolve(task_name="click_bell", **config)
+        self.assertEqual((source.local_dir, source.backend), (self.local.resolve(), "pi0"))
+
+    def test_a_pi0_entry_must_name_its_config(self):
+        for bad in (None, "", "drawer", "pi0 drawer"):
+            with self.subTest(pi0_config=bad), self.assertRaises(checkpoints.CheckpointError):
+                resolve(task_name="click_bell", **self.table(click_bell=self.pi0(pi0_config=bad)))
+
+    def test_a_pi0_entry_takes_no_smolvla_mode(self):
+        for extra in ({"mode": "legacy"}, {"mode": "required", "content_sha256": "a" * 64}):
+            with self.subTest(extra=extra), self.assertRaises(checkpoints.CheckpointError):
+                resolve(task_name="click_bell", **self.table(click_bell=self.pi0(**extra)))
+
+    def test_unknown_backend_and_stray_pi0_config_are_refused(self):
+        with self.assertRaises(checkpoints.CheckpointError):
+            resolve(task_name="click_bell", **self.table(click_bell=self.pi0(backend="pi05")))
+        with self.assertRaises(checkpoints.CheckpointError):
+            resolve(task_name="click_bell", **self.table(click_bell={**entry(), "pi0_config": "pi0_x"}))
+
+    def test_a_broken_pi0_entry_fails_every_task(self):
+        config = self.table(click_bell={**entry(), "mode": "legacy"}, handle_basket=self.pi0(pi0_config=None))
+        with self.assertRaises(checkpoints.CheckpointError) as cm:
+            resolve(task_name="click_bell", **config)
+        self.assertIn("checkpoints.tasks.handle_basket", str(cm.exception))
+
+    def test_the_default_cannot_route_to_pi0(self):
+        with self.assertRaises(checkpoints.CheckpointError):
+            resolve(task_name="click_bell", checkpoints={"default": self.pi0(), "tasks": {}})
+
+    def test_the_pi0_entry_still_needs_a_full_revision(self):
+        with self.assertRaises(checkpoints.CheckpointError):
+            resolve(task_name="click_bell", **self.table(click_bell=self.pi0(revision="main")))
+
+
 class VlmPin(unittest.TestCase):
     PINNED = {"repo_id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct", "revision": REV_A}
 

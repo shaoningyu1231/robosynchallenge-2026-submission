@@ -17,7 +17,7 @@ import numpy as np
 import torch
 
 from policy.inference_timing import finish_inference, start_inference
-from policy.smolvla_multitask import noise_seed, task_norm as task_norm_module
+from policy.smolvla_multitask import noise_seed, pi0_backend, task_norm as task_norm_module
 from policy.smolvla_multitask.checkpoints import VLM_REQUIRED_FILES, materialize, resolve_source, resolve_vlm
 
 
@@ -524,11 +524,14 @@ def get_model(usr_args):
     # It comes first because the entry is also where a mixed routing declares
     # this task's normalization.
     source = resolve_source(usr_args)
+    python_bin = usr_args.get("smolvla_python") or os.environ.get("SMOLVLA_PYTHON") or sys.executable
+    if source.backend == "pi0":
+        # A task routed to pi0 (pi0_backend.py); nothing below applies to it.
+        return pi0_backend.get_model(usr_args, source, materialize, python_bin)
     # Declared, never inferred: a checkpoint that lost its statistics must fail
     # here rather than quietly evaluate as a legacy one.
     mode = task_norm_module.resolve_mode(usr_args, source.mode)
     vlm = resolve_vlm(usr_args)
-    python_bin = usr_args.get("smolvla_python") or os.environ.get("SMOLVLA_PYTHON") or sys.executable
     checkpoint_dir = materialize(source, python_bin)
     # Both directions, before the VLM is fetched or the worker started: a Q1c
     # checkpoint under a legacy config is refused just like a required config
@@ -592,6 +595,8 @@ def get_model(usr_args):
 
 
 def eval(env, model, obs):
+    if isinstance(model, pi0_backend.Pi0Model):
+        return pi0_backend.eval(env, model, obs)
     if model.noise_base is not None and model.episode_record["noise_seed"] is None:
         model.seed_noise(_episode_env_seed(env))
     instruction = getattr(env, "_current_instruction", None) or "click the bell"
@@ -644,6 +649,8 @@ def reset_model(model):
 
 def episode_metadata(model):
     """Per-episode record for evaluation_metrics.json: seeds, forwards, noise and action digests."""
+    if isinstance(model, pi0_backend.Pi0Model):
+        return pi0_backend.episode_metadata(model)
     return model.episode_metadata()
 
 

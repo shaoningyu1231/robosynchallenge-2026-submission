@@ -26,6 +26,11 @@
 # config, processor and tokenizer -- from the Hub's current main. Without the
 # pin an empty cache would build the model on whatever main is that day.
 #
+# An entry may instead route its task to a pi0 checkpoint (`backend: pi0`, with the
+# openpi config name in `pi0_config`): pi0_backend.py serves it in policy/pi05's
+# own environment. Such an entry declares no mode -- SmolVLA's normalization does
+# not apply to it -- and is left out of the all-or-none mode rule.
+#
 # Standard library only, so it can be tested without torch or the simulator.
 
 from __future__ import annotations
@@ -46,7 +51,9 @@ ENTRY_KEYS = {"repo_id", "revision"}
 # Optional per-entry keys. `mode` is how a mixed routing declares, for each
 # task, which normalization its checkpoint was trained with; `content_sha256`
 # binds a required-mode entry to one statistics document.
-OPTIONAL_ENTRY_KEYS = {"mode", "content_sha256"}
+OPTIONAL_ENTRY_KEYS = {"mode", "content_sha256", "backend", "pi0_config"}
+BACKENDS = ("smolvla", "pi0")
+PI0_CONFIG = re.compile(r"pi0_[a-z0-9_]+")
 MODES = ("legacy", "required")
 CONTENT_SHA256 = re.compile(r"[0-9a-f]{64}")
 # Files a LeRobot SmolVLA checkpoint cannot load without.
@@ -72,6 +79,8 @@ class CheckpointSource:
     # config's single smolvla_task_normalization applies (one model, every task).
     mode: str | None = None
     content_sha256: str | None = None
+    backend: str = "smolvla"     # or "pi0": pi0_backend.py serves the checkpoint
+    pi0_config: str | None = None
 
     def describe(self) -> str:
         if self.local_dir is not None:
@@ -146,6 +155,26 @@ def _entry_mode(entry, where: str) -> tuple[str | None, str | None]:
     return mode, digest
 
 
+def _entry_backend(entry, where: str) -> tuple[str, str | None]:
+    """The backend of one entry (smolvla unless it says pi0) and, for pi0, its openpi config name."""
+    backend = entry.get("backend", "smolvla")
+    if backend not in BACKENDS:
+        raise CheckpointError(f"{where}.backend must be one of {list(BACKENDS)}, got {backend!r}")
+    config = entry.get("pi0_config")
+    if backend == "pi0":
+        if not isinstance(config, str) or not PI0_CONFIG.fullmatch(config):
+            raise CheckpointError(f"{where} routes to pi0 and must name its openpi config in pi0_config, got {config!r}")
+        if entry.get("mode") is not None or entry.get("content_sha256") is not None:
+            raise CheckpointError(f"{where} routes to pi0; mode and content_sha256 are SmolVLA's and do not apply")
+    elif config is not None:
+        raise CheckpointError(f"{where} gives pi0_config but its backend is {backend!r}")
+    return backend, config
+
+
+def _is_pi0(entry) -> bool:
+    return isinstance(entry, dict) and entry.get("backend") == "pi0"
+
+
 def _declared_modes(table: dict, per_task: dict) -> bool:
     """Whether this table declares modes per entry -- all of them, or none.
 
@@ -155,7 +184,7 @@ def _declared_modes(table: dict, per_task: dict) -> bool:
     """
     entries = [("checkpoints.default", table.get("default"))]
     entries += [(f"checkpoints.tasks.{name}", value) for name, value in sorted(per_task.items())]
-    entries = [(where, value) for where, value in entries if isinstance(value, dict)]
+    entries = [(where, value) for where, value in entries if isinstance(value, dict) and not _is_pi0(value)]
     with_mode = [where for where, value in entries if value.get("mode") is not None]
     if not with_mode:
         return False
@@ -209,11 +238,14 @@ def resolve_source(usr_args: dict, tasks: set[str] | None = None) -> CheckpointS
             where = f"checkpoints.tasks.{name}"
             _local_entry(value, where) if _is_local_entry(value) else _hf_entry(value, where)
             _entry_mode(value, where)
+            _entry_backend(value, where)
     if table.get("default") is not None:
         default = table["default"]
         _local_entry(default, "checkpoints.default") if _is_local_entry(default) \
             else _hf_entry(default, "checkpoints.default")
         _entry_mode(default, "checkpoints.default")
+        if _entry_backend(default, "checkpoints.default")[0] != "smolvla":
+            raise CheckpointError("checkpoints.default cannot route to pi0: name the pi0 task in checkpoints.tasks")
     if declared and table.get("default") is not None and per_task:
         # With per-task modes the routing must be spelt out task by task; a
         # default would cover an unlisted task with a mode chosen for others.
@@ -226,12 +258,13 @@ def resolve_source(usr_args: dict, tasks: set[str] | None = None) -> CheckpointS
         if entry is None:
             continue
         mode, digest = _entry_mode(entry, where)
+        backend, pi0_config = _entry_backend(entry, where)
         if _is_local_entry(entry):
             return CheckpointSource(origin=where, local_dir=_local_entry(entry, where),
-                                    mode=mode, content_sha256=digest)
+                                    mode=mode, content_sha256=digest, backend=backend, pi0_config=pi0_config)
         repo_id, revision = _hf_entry(entry, where)
         return CheckpointSource(origin=where, repo_id=repo_id, revision=revision,
-                                mode=mode, content_sha256=digest)
+                                mode=mode, content_sha256=digest, backend=backend, pi0_config=pi0_config)
 
     raise CheckpointError(
         f"no checkpoint configured for task {task!r}: checkpoint_dir is empty, "
