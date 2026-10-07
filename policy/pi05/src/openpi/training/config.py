@@ -1013,6 +1013,139 @@ _CONFIGS = [
         checkpoint_base_dir="/root/autodl-tmp/b2/checkpoints",  # trainbox2 local data disk,
         wandb_enabled=False,
     ),
+    # Research (B2): mixer_operating, the B1 recipe (experiments/B1_RECIPE.txt) unchanged except the task data and normalizer,
+    # the run name / directories, 16k steps and the saves (10000 and the last step only). From pi0_base, not from drawer.
+    TrainConfig(
+        name="pi0_mixer_operating_lora_b2",
+        exp_name="b2_mixer_operating",
+        model=pi0_config.Pi0Config(
+            action_horizon=50, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ),
+        data=LeRobotRoboSynV21DataConfig(
+            repo_id="RoboSynChallenge/cobotmagic_Sim_mixer_operating",
+            base_config=DataConfig(prompt_from_task=True),
+            prompt_override=None,   # the organisers text, identical to the evaluator instruction (checked 2026-10-04)
+            action_offset=1,        # same pairing as drawer (tools/b2_offset_check.py: arm error 0.00054 at k=0), 2026-10-04
+            assets=AssetsConfig(assets_dir="/root/autodl-fs/b2/assets/pi0_mixer_operating_lora_b2"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/root/autodl-fs/openpi_assets/checkpoints/pi0_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-8, weight_decay=1e-10, clip_gradient_norm=1.0),
+        seed=42,
+        batch_size=32,
+        num_train_steps=16_000,
+        log_interval=10,
+        save_interval=10_000,
+        keep_period=10_000,
+        num_workers=16,
+        assets_base_dir="/root/autodl-fs/b2/assets",
+        checkpoint_base_dir="/root/autodl-fs/b2/checkpoints",
+        wandb_enabled=False,
+    ),
+    # Research (B2): items_handover, the B1 recipe (experiments/B1_RECIPE.txt) unchanged except the task data and normalizer,
+    # the run name / directories, 16k steps and the saves (10000 and the last step only). From pi0_base, not from drawer.
+    TrainConfig(
+        name="pi0_items_handover_lora_b2",
+        exp_name="b2_items_handover",
+        model=pi0_config.Pi0Config(
+            action_horizon=50, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ),
+        data=LeRobotRoboSynV21DataConfig(
+            repo_id="RoboSynChallenge/cobotmagic_Sim_items_handover",
+            base_config=DataConfig(prompt_from_task=True),
+            prompt_override=None,   # the organisers text, identical to the evaluator instruction (checked 2026-10-04)
+            action_offset=1,        # recording order confirmed identical (first gripper response in the same frame 2000/2000); data check minimum at k=2 is actuator lag, offset +1 accepted by the user 2026-10-04
+            assets=AssetsConfig(assets_dir="/root/autodl-fs/b2/assets/pi0_items_handover_lora_b2"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/root/autodl-fs/openpi_assets/checkpoints/pi0_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-8, weight_decay=1e-10, clip_gradient_norm=1.0),
+        seed=42,
+        batch_size=32,
+        num_train_steps=16_000,
+        log_interval=10,
+        save_interval=10_000,
+        keep_period=10_000,
+        num_workers=16,
+        assets_base_dir="/root/autodl-fs/b2/assets",
+        checkpoint_base_dir="/root/autodl-tmp/b2/checkpoints",  # trainbox2 local data disk,
+        wandb_enabled=False,
+    ),
+    # Research (B2 batch 2): handle_basket, data revision c40819ca (the fixed official data; its relation to the
+    # official checkpoint's training data is not established -- experiments/B2_APPENDIX_3.txt), the B1 recipe (experiments/B1_RECIPE.txt) unchanged except the task data and normalizer,
+    # the run name / directories, 16k steps and the saves (10000 and the last step only). From pi0_base, not from drawer.
+    TrainConfig(
+        name="pi0_handle_basket_lora_b2",
+        exp_name="b2_handle_basket",
+        model=pi0_config.Pi0Config(
+            action_horizon=50, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ),
+        data=LeRobotRoboSynV21DataConfig(
+            repo_id="RoboSynChallenge/cobotmagic_Sim_handle_basket",
+            base_config=DataConfig(prompt_from_task=True),
+            prompt_override=None,   # the organisers text, identical to the evaluator instruction (checked 2026-10-04)
+            action_offset=1,        # same pairing as drawer (tools/b2_offset_check.py: arm error 0.00061 at k=0), 2026-10-05
+            assets=AssetsConfig(assets_dir="/root/autodl-fs/b2/assets/pi0_handle_basket_lora_b2"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/root/autodl-fs/openpi_assets/checkpoints/pi0_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-8, weight_decay=1e-10, clip_gradient_norm=1.0),
+        seed=42,
+        batch_size=32,
+        num_train_steps=16_000,
+        log_interval=10,
+        save_interval=10_000,
+        keep_period=10_000,
+        num_workers=16,
+        assets_base_dir="/root/autodl-fs/b2/assets",
+        checkpoint_base_dir="/root/autodl-fs/b2/checkpoints",
+        wandb_enabled=False,
+    ),
+    # Research (B2 batch 2): water_pouring, data revision 932a2876, the B1 recipe (experiments/B1_RECIPE.txt) unchanged except the task data and normalizer,
+    # the run name / directories, 16k steps and the saves (10000 and the last step only). From pi0_base, not from drawer.
+    TrainConfig(
+        name="pi0_water_pouring_lora_b2",
+        exp_name="b2_water_pouring",
+        model=pi0_config.Pi0Config(
+            action_horizon=50, paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ),
+        data=LeRobotRoboSynV21DataConfig(
+            repo_id="RoboSynChallenge/cobotmagic_Sim_water_pouring",
+            base_config=DataConfig(prompt_from_task=True),
+            prompt_override=None,   # the organisers text, identical to the evaluator instruction (checked 2026-10-04)
+            action_offset=1,        # same pairing as drawer (tools/b2_offset_check.py: arm error 0.00077 at k=0), 2026-10-05
+            assets=AssetsConfig(assets_dir="/root/autodl-fs/b2/assets/pi0_water_pouring_lora_b2"),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("/root/autodl-fs/openpi_assets/checkpoints/pi0_base/params"),
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=1_000, peak_lr=2.5e-5, decay_steps=30_000, decay_lr=2.5e-6),
+        optimizer=_optimizer.AdamW(b1=0.9, b2=0.95, eps=1e-8, weight_decay=1e-10, clip_gradient_norm=1.0),
+        seed=42,
+        batch_size=32,
+        num_train_steps=16_000,
+        log_interval=10,
+        save_interval=10_000,
+        keep_period=10_000,
+        num_workers=16,
+        assets_base_dir="/root/autodl-fs/b2/assets",
+        checkpoint_base_dir="/root/autodl-tmp/b2/checkpoints",  # trainbox2 local data disk
+        wandb_enabled=False,
+    ),
     TrainConfig(
         name="pi0_base_robosynchallenge_full",
         model=pi0_config.Pi0Config(action_horizon=50),
