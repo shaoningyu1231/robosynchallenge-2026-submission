@@ -135,15 +135,70 @@ class Files(unittest.TestCase):
             with self.assertRaisesRegex(B.Pi0Error, "expected"):  # wrong content: refused, nothing cached
                 B.prepare_data_home(c, home)
             self.assertFalse((home / B.TOKENIZER).exists())
-            self.assertEqual(list((home / "big_vision").iterdir()), [])  # no .partial left
+            self.assertEqual(list((home / "big_vision").iterdir()), [])  # no temporary file left
             B.TOKENIZER_SHA256 = hashlib.sha256(b"tokenizer bytes").hexdigest()
             self.assertTrue(B.prepare_data_home(c, home).startswith("downloaded from"))
             self.assertEqual((home / B.TOKENIZER).read_bytes(), b"tokenizer bytes")
             src.unlink()  # cached start: no download needed any more
             self.assertEqual(B.prepare_data_home(c, home), "present")
-            (home / B.TOKENIZER).write_bytes(b"corrupted")  # a bad cache is not trusted
-            with self.assertRaisesRegex(B.Pi0Error, "download"):
+            (home / B.TOKENIZER).write_bytes(b"corrupted")  # a bad cache is not used: it is downloaded again ...
+            with self.assertRaisesRegex(B.Pi0Error, "download"):  # ... here the source is gone, so that fails
                 B.prepare_data_home(c, home)
+            src.write_bytes(b"tokenizer bytes")
+            self.assertTrue(B.prepare_data_home(c, home).startswith("downloaded from"))  # replaced by verified content
+            self.assertEqual((home / B.TOKENIZER).read_bytes(), b"tokenizer bytes")
+        finally:
+            B.TOKENIZER_URL, B.TOKENIZER_SHA256 = saved
+
+    def test_offline_start_needs_a_verified_cache_and_never_downloads(self):
+        c, home = self.checkpoint(), self.root / "home"
+        src = self.root / "source.model"
+        src.write_bytes(b"tokenizer bytes")
+        saved = (B.TOKENIZER_URL, B.TOKENIZER_SHA256, os.environ.get("PI0_TOKENIZER_OFFLINE"))
+        B.TOKENIZER_URL, B.TOKENIZER_SHA256 = src.as_uri(), hashlib.sha256(b"tokenizer bytes").hexdigest()
+        os.environ["PI0_TOKENIZER_OFFLINE"] = "1"
+        try:
+            with self.assertRaisesRegex(B.Pi0Error, "PI0_TOKENIZER_OFFLINE"):  # empty cache: no download
+                B.prepare_data_home(c, home)
+            self.assertFalse((home / B.TOKENIZER).exists())
+            del os.environ["PI0_TOKENIZER_OFFLINE"]
+            B.prepare_data_home(c, home)  # first start, online
+            os.environ["PI0_TOKENIZER_OFFLINE"] = "1"
+            src.unlink()
+            self.assertEqual(B.prepare_data_home(c, home), "present")  # second start: the cache suffices offline
+        finally:
+            B.TOKENIZER_URL, B.TOKENIZER_SHA256 = saved[:2]
+            if saved[2] is None:
+                os.environ.pop("PI0_TOKENIZER_OFFLINE", None)
+            else:
+                os.environ["PI0_TOKENIZER_OFFLINE"] = saved[2]
+
+    def test_concurrent_downloads_do_not_clobber_each_other(self):
+        import threading
+        c, home = self.checkpoint(), self.root / "home"
+        payload = os.urandom(1 << 20)
+        src = self.root / "source.model"
+        src.write_bytes(payload)
+        saved = (B.TOKENIZER_URL, B.TOKENIZER_SHA256)
+        B.TOKENIZER_URL, B.TOKENIZER_SHA256 = src.as_uri(), hashlib.sha256(payload).hexdigest()
+        errors = []
+        def go():
+            try:
+                for _ in range(5):
+                    B.fetch_tokenizer(home / B.TOKENIZER)
+                    if (home / B.TOKENIZER).read_bytes() != payload:
+                        errors.append("a reader saw an incomplete or foreign file")
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+        try:
+            threads = [threading.Thread(target=go) for _ in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            self.assertEqual(errors, [])
+            self.assertEqual((home / B.TOKENIZER).read_bytes(), payload)
+            self.assertEqual(sorted(p.name for p in (home / "big_vision").iterdir()), ["paligemma_tokenizer.model"])
         finally:
             B.TOKENIZER_URL, B.TOKENIZER_SHA256 = saved
 

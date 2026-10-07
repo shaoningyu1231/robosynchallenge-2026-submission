@@ -37,6 +37,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 from pathlib import Path
@@ -104,27 +105,34 @@ def check_checkpoint(path: Path) -> Path:
 
 
 def fetch_tokenizer(target: Path, url: str | None = None, timeout_s: float = 120) -> None:
-    """Download the tokenizer from its original source into target; kept only when its sha256 is the pinned one."""
+    """Download the tokenizer from its original source into target; kept only when its sha256 is the pinned one.
+    Every download writes its own temporary file next to target and moves it in with one atomic rename after the
+    check, so concurrent installs or starts never overwrite or delete each other's file, and readers only ever see
+    a complete, verified tokenizer."""
     url = url or TOKENIZER_URL
-    part = target.with_name(target.name + ".partial")
     target.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=target.name + ".", suffix=".partial", dir=target.parent)
+    part = Path(name)
     try:
-        with urllib.request.urlopen(url, timeout=timeout_s) as r, open(part, "wb") as f:
-            shutil.copyfileobj(r, f)
-    except OSError as e:
+        try:
+            with urllib.request.urlopen(url, timeout=timeout_s) as r, os.fdopen(fd, "wb") as f:
+                shutil.copyfileobj(r, f)
+        except OSError as e:
+            raise Pi0Error(f"PaliGemma tokenizer download from {url} failed: {e}") from e
+        got = sha256_file(part)
+        if got != TOKENIZER_SHA256:
+            raise Pi0Error(f"PaliGemma tokenizer from {url} has sha256 {got}, expected {TOKENIZER_SHA256}; not used")
+        os.replace(part, target)
+    finally:
         part.unlink(missing_ok=True)
-        raise Pi0Error(f"PaliGemma tokenizer download from {url} failed: {e}") from e
-    got = sha256_file(part)
-    if got != TOKENIZER_SHA256:
-        part.unlink()
-        raise Pi0Error(f"PaliGemma tokenizer from {url} has sha256 {got}, expected {TOKENIZER_SHA256}; not used")
-    os.replace(part, target)
 
 
 def prepare_data_home(checkpoint_dir: Path, data_home: Path) -> str:
     """The PaliGemma tokenizer where openpi looks for it (OPENPI_DATA_HOME/big_vision/...), never trusted unhashed:
     the verified cache; else a copy carried by the checkpoint snapshot; else a download from the original source
-    (TOKENIZER_URL), cached once its sha256 is the pinned one. So the server itself never fetches it unverified."""
+    (TOKENIZER_URL), cached once its sha256 is the pinned one. So the server itself never fetches it unverified.
+    A cached file with another hash is not used: it is replaced by a fresh, verified download. With
+    PI0_TOKENIZER_OFFLINE=1 nothing is downloaded: a missing or bad cache is an error."""
     target = data_home / TOKENIZER
     if target.is_file() and sha256_file(target) == TOKENIZER_SHA256:
         return "present"
@@ -135,6 +143,8 @@ def prepare_data_home(checkpoint_dir: Path, data_home: Path) -> str:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(shipped, target)
         return "from the checkpoint snapshot"
+    if os.environ.get("PI0_TOKENIZER_OFFLINE") == "1":
+        raise Pi0Error(f"PaliGemma tokenizer not in {target} with sha256 {TOKENIZER_SHA256}, and PI0_TOKENIZER_OFFLINE=1")
     fetch_tokenizer(target)
     return f"downloaded from {TOKENIZER_URL} (sha256 verified), cached"
 
