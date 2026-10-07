@@ -13,8 +13,12 @@
 #    version and hashes are taken from the same uv.lock and enforced. Nothing is
 #    installed into the simulator's environment itself.
 #
+# 3. the PaliGemma tokenizer, downloaded once from its original source
+#    (storage.googleapis.com/big_vision) and cached only if its sha256 is the
+#    one pinned in pi0_backend.py (not shipped with the weights).
+#
 # Needs uv (https://docs.astral.sh/uv/) and network access to the sources
-# named in policy/pi05/uv.lock. About 12 GB on disk.
+# named in policy/pi05/uv.lock and to storage.googleapis.com. About 12 GB on disk.
 # ----------------------------------------------------------------------------
 
 set -euo pipefail
@@ -48,6 +52,11 @@ print("msgpack", p["version"], len(hashes), "hashes from the lock")
 PY
 "$UV" pip install --python "$PYTHON_BIN" --target "$DEPS_DIR" --no-deps --require-hashes -r "$req"
 rm -f "$req"
+
+echo "== PaliGemma tokenizer from its original source (sha256 pinned in pi0_backend.py) -> data home"
+(cd "$REPO_ROOT" && "$PYTHON_BIN" -c "import sys; sys.path.insert(0, '.'); \
+from pathlib import Path; from policy.smolvla_multitask import pi0_backend as B; \
+print('tokenizer:', B.prepare_data_home(Path('/nonexistent'), Path('${PI0_OPENPI_DATA_HOME:-$SCRIPT_DIR/.pi0_openpi_data}')))")
 
 echo "== checks"
 "$PYTHON_BIN" -c "import sys; sys.path[:0] = ['$DEPS_DIR', '$PI05_DIR/packages/openpi-client/src']; \

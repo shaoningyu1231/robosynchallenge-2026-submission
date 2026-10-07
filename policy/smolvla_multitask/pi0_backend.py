@@ -38,6 +38,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 import numpy as np
@@ -53,6 +54,8 @@ DEFAULT_CLIENT_DEPS = POLICY_DIR / ".pi0_client_deps"       # msgpack, installed
 DEFAULT_DATA_HOME = POLICY_DIR / ".pi0_openpi_data"         # OPENPI_DATA_HOME of the server
 TOKENIZER = "big_vision/paligemma_tokenizer.model"
 TOKENIZER_SHA256 = "8986bb4f423f07f8c7f70d0dbe3526fb2316056c17bae71b1ea975e77a168fc6"
+# the original source openpi itself reads (gs://big_vision/paligemma_tokenizer.model), over HTTPS; never a mirror
+TOKENIZER_URL = "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model"
 # what a pi0 checkpoint cannot be served without (openpi's params and its normalizer)
 REQUIRED_FILES = ("params/_METADATA", "params/manifest.ocdbt")
 PI0_STEP = 10
@@ -100,9 +103,28 @@ def check_checkpoint(path: Path) -> Path:
     return path
 
 
+def fetch_tokenizer(target: Path, url: str | None = None, timeout_s: float = 120) -> None:
+    """Download the tokenizer from its original source into target; kept only when its sha256 is the pinned one."""
+    url = url or TOKENIZER_URL
+    part = target.with_name(target.name + ".partial")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as r, open(part, "wb") as f:
+            shutil.copyfileobj(r, f)
+    except OSError as e:
+        part.unlink(missing_ok=True)
+        raise Pi0Error(f"PaliGemma tokenizer download from {url} failed: {e}") from e
+    got = sha256_file(part)
+    if got != TOKENIZER_SHA256:
+        part.unlink()
+        raise Pi0Error(f"PaliGemma tokenizer from {url} has sha256 {got}, expected {TOKENIZER_SHA256}; not used")
+    os.replace(part, target)
+
+
 def prepare_data_home(checkpoint_dir: Path, data_home: Path) -> str:
-    """The PaliGemma tokenizer where openpi looks for it (OPENPI_DATA_HOME/big_vision/...), so the server does not need
-    to reach Google Cloud Storage: taken from the checkpoint snapshot when it carries one, never trusted unhashed."""
+    """The PaliGemma tokenizer where openpi looks for it (OPENPI_DATA_HOME/big_vision/...), never trusted unhashed:
+    the verified cache; else a copy carried by the checkpoint snapshot; else a download from the original source
+    (TOKENIZER_URL), cached once its sha256 is the pinned one. So the server itself never fetches it unverified."""
     target = data_home / TOKENIZER
     if target.is_file() and sha256_file(target) == TOKENIZER_SHA256:
         return "present"
@@ -113,7 +135,8 @@ def prepare_data_home(checkpoint_dir: Path, data_home: Path) -> str:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(shipped, target)
         return "from the checkpoint snapshot"
-    return "absent (openpi downloads it from gs://big_vision on first use)"
+    fetch_tokenizer(target)
+    return f"downloaded from {TOKENIZER_URL} (sha256 verified), cached"
 
 
 def _free_port() -> int:

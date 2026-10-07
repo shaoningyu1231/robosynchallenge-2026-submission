@@ -111,7 +111,6 @@ class Files(unittest.TestCase):
     def test_tokenizer_comes_from_the_snapshot_only_when_its_hash_is_right(self):
         c = self.checkpoint()
         home = self.root / "home"
-        self.assertTrue(B.prepare_data_home(c, home).startswith("absent"))
         (c / "big_vision").mkdir()
         (c / B.TOKENIZER).write_bytes(b"not the tokenizer")
         with self.assertRaises(B.Pi0Error):
@@ -124,6 +123,32 @@ class Files(unittest.TestCase):
             self.assertEqual(B.prepare_data_home(c, home), "present")
         finally:
             B.TOKENIZER_SHA256 = saved
+
+
+    def test_tokenizer_download_is_cached_only_with_the_pinned_hash(self):
+        c, home = self.checkpoint(), self.root / "home"
+        src = self.root / "source.model"
+        src.write_bytes(b"tokenizer bytes")
+        saved = (B.TOKENIZER_URL, B.TOKENIZER_SHA256)
+        B.TOKENIZER_URL = src.as_uri()
+        try:
+            with self.assertRaisesRegex(B.Pi0Error, "expected"):  # wrong content: refused, nothing cached
+                B.prepare_data_home(c, home)
+            self.assertFalse((home / B.TOKENIZER).exists())
+            self.assertEqual(list((home / "big_vision").iterdir()), [])  # no .partial left
+            B.TOKENIZER_SHA256 = hashlib.sha256(b"tokenizer bytes").hexdigest()
+            self.assertTrue(B.prepare_data_home(c, home).startswith("downloaded from"))
+            self.assertEqual((home / B.TOKENIZER).read_bytes(), b"tokenizer bytes")
+            src.unlink()  # cached start: no download needed any more
+            self.assertEqual(B.prepare_data_home(c, home), "present")
+            (home / B.TOKENIZER).write_bytes(b"corrupted")  # a bad cache is not trusted
+            with self.assertRaisesRegex(B.Pi0Error, "download"):
+                B.prepare_data_home(c, home)
+        finally:
+            B.TOKENIZER_URL, B.TOKENIZER_SHA256 = saved
+
+    def test_tokenizer_source_is_the_original_bucket(self):
+        self.assertEqual(B.TOKENIZER_URL, "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model")
 
 
 class ServerLifecycle(unittest.TestCase):
