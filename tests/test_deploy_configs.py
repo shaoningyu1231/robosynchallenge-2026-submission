@@ -113,6 +113,27 @@ class DeployConfigs(unittest.TestCase):
         self.assertEqual({k: v for k, v in ta.items() if k != "items_handover"},
                          {k: v for k, v in tb.items() if k != "items_handover"})
 
+    def test_pi0_three_config_routes_drawer_handover_mixer_and_keeps_seven_legacy(self):
+        config = yaml.safe_load((CONFIG_DIR / "test_configs/pi0_three_local.yml").read_text())
+        resolved = modes_of(config)
+        self.assertEqual(set(resolved), set(COMPETITION_TASKS))
+        pi0 = {"drawer_open_place", "items_handover", "mixer_operating"}
+        self.assertEqual({t for t, m in resolved.items() if m == "pi0"}, pi0)
+        for task in set(COMPETITION_TASKS) - pi0:
+            self.assertEqual(resolved[task], "legacy", task)
+        entry = config["checkpoints"]["tasks"]["mixer_operating"]
+        self.assertEqual(entry["pi0_config"], "pi0_mixer_operating_lora_b2")
+        self.assertTrue(entry["local_dir"].endswith("/b2_mixer_operating/15999"))  # the B7 locked label (step 16000)
+        self.assertIn('name="pi0_mixer_operating_lora_b2"', (ROOT / "policy/pi05/src/openpi/training/config.py").read_text())
+
+    def test_pi0_three_config_differs_from_the_drawer_handover_one_only_in_the_mixer_entry(self):
+        a = yaml.safe_load((CONFIG_DIR / "test_configs/pi0_drawer_handover_local.yml").read_text())
+        b = yaml.safe_load((CONFIG_DIR / "test_configs/pi0_three_local.yml").read_text())
+        ta, tb = a["checkpoints"].pop("tasks"), b["checkpoints"].pop("tasks")
+        self.assertEqual(a, b)
+        self.assertEqual({k: v for k, v in ta.items() if k != "mixer_operating"},
+                         {k: v for k, v in tb.items() if k != "mixer_operating"})
+
     def test_pi0_cannot_be_assigned_a_smolvla_mode(self):
         config = yaml.safe_load((CONFIG_DIR / "test_configs/pi0_drawer_local.yml").read_text())
         config["checkpoints"]["tasks"]["drawer_open_place"]["mode"] = "legacy"

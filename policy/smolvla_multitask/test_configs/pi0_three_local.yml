@@ -1,0 +1,167 @@
+# ----------------------------------------------------------------------------
+# Acceptance only, on our own machines: the submission config with drawer_open_place,
+# items_handover and mixer_operating routed to pi0 from local directories (policy/smolvla_multitask/pi0_backend.py).
+# Every other line is deploy_policy.yml's. Not shippable: local_dir exists only here.
+# ----------------------------------------------------------------------------
+# SmolVLA multi-task submission: evaluation configuration
+#
+# Standard command (see policy/smolvla_multitask/README.md):
+#   bash policy/smolvla_multitask/eval.sh <task_name> <setting> <gpu_id> [--key value ...]
+
+policy_name: smolvla_multitask
+task_name: click_bell
+setting: clear
+model_name: smolvla_multitask
+seed: 0
+max_episodes: 1
+max_steps: 100
+headless: true
+device: cpu
+renderer: auto
+gpu_id: 0
+pytorch_device: cuda
+num_envs: 1
+filter_dataset_saving: true
+eval_video_log: false
+eval_video_obs_key: cam_high
+eval_expert_check: true
+# Our own comparison protocol, not the organisers' evaluation: a JSON list of
+# episode seeds frozen once by tools/select_episode_seeds.py. When set, those
+# seeds are used in order and the expert feasibility filter is turned off (it is
+# not reproducible for every task). null keeps the organisers' protocol.
+eval_episode_seeds: null
+
+# ------------------------------------------------------------------
+# Which checkpoint each task is evaluated with, in this order
+# (policy/smolvla_multitask/checkpoints.py):
+#   1. checkpoint_dir, when given: a local directory; a LeRobot step directory
+#      containing pretrained_model/ is also accepted
+#   2. checkpoints.tasks.<task_name>
+#   3. checkpoints.default
+#   4. otherwise the evaluation stops with an error. It never falls back to
+#      the official per-task checkpoints.
+# Hugging Face entries take exactly repo_id and a full 40-character commit
+# hash as revision, and must download without logging in.
+# ------------------------------------------------------------------
+checkpoint_dir: ""
+checkpoints:
+  # No default. Every task is named, so an unlisted or misspelt one stops the
+  # run instead of being covered by a model chosen for other tasks.
+  default: null
+  tasks:
+    # The final mapping (experiments/holdout_DECISION.txt in the research
+    # repository): all ten tasks on the official single-task checkpoints, each
+    # pinned to the revision it was evaluated at.
+    #
+    # items_handover was the one task this project had chosen its own model for,
+    # on development evidence -- Q2-A led 12/30 against official's 5/30. On a
+    # hundred holdout scenes nothing had touched it was 21 against 26, and on
+    # the audit hundred 21 against 22, so the swap fails the admission rule and
+    # the task comes back here. Neither half is significant: that says there is
+    # no evidence for the change, not that Q2-A is worse.
+    items_handover:
+      # pi0 handover 16k (research repository, experiments/B6_RESULT_items_handover.txt: independent test passed),
+      # served from the verified directory on our own machines; replaced by repo_id + revision once published
+      local_dir: /root/autodl-fs/b2/checkpoints/pi0_items_handover_lora_b2/b2_items_handover/15999
+      backend: pi0
+      pi0_config: pi0_items_handover_lora_b2
+    table_rearrangement:
+      repo_id: RoboSynChallenge/SmolVLA_sim_table_rearrangement
+      revision: 913b29a7136876108a330aead1855309f985cbd8
+      mode: legacy
+    click_bell:
+      repo_id: RoboSynChallenge/SmolVLA_sim_click_bell
+      revision: 27965b7e2432f5a3084f2c60a04bff7c5a47b853
+      mode: legacy
+    water_pouring:
+      repo_id: RoboSynChallenge/SmolVLA_sim_water_pouring
+      revision: 2bf5d9c2d8d0b5820ba5c9fe6284c5ff8647561f
+      mode: legacy
+    handle_basket:
+      repo_id: RoboSynChallenge/SmolVLA_sim_handle_basket
+      revision: 0de9a93f124bd4ebe2fbd0d572ce3133806b82a9
+      mode: legacy
+    drawer_open_place:
+      # pi0 drawer 16k (research repository, experiments/B3_DRAWER_TEST_RESULT.txt), served from the
+      # verified directory on our own machines; replaced by repo_id + revision once the weights are published
+      local_dir: /root/autodl-fs/b1/checkpoints/pi0_drawer_lora_b1_tomato/b1_tomato_ext16k/15999
+      backend: pi0
+      pi0_config: pi0_drawer_lora_b1_tomato
+    mixer_operating:
+      # pi0 mixer 16k (research repository, experiments/B7_RESULT_mixer_operating.txt: independent test passed under the
+      # plan as amended by addendum 4), served from the verified directory on our own machines
+      local_dir: /root/autodl-fs/b2/checkpoints/pi0_mixer_operating_lora_b2/b2_mixer_operating/15999
+      backend: pi0
+      pi0_config: pi0_mixer_operating_lora_b2
+    item_assembly:
+      repo_id: RoboSynChallenge/SmolVLA_sim_item_assembly
+      revision: db32020164ed2c7264804a5eb036a38a07d879ca
+      mode: legacy
+    manipulate_pipette:
+      repo_id: RoboSynChallenge/SmolVLA_sim_manipulate_pipette
+      revision: dd0e80bc7d5fa5081e1fa07f1b7115bad6dbffa0
+      mode: legacy
+    sample_loading:
+      repo_id: RoboSynChallenge/SmolVLA_sim_sample_loading
+      revision: 2a4f41ab3be8e5f544c890d6054bc8de3be5c53b
+      mode: legacy
+
+# ------------------------------------------------------------------
+# The VLM backbone, pinned like the checkpoints. A SmolVLA checkpoint names it
+# by repo id only; without this LeRobot would load the Hub's current main. The
+# checkpoint's own vlm_model_name must equal repo_id.
+# ------------------------------------------------------------------
+vlm:
+  repo_id: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
+  revision: 7b375e1b73b11138ff12fe22c8f2822d8fe03467
+
+# ------------------------------------------------------------------
+# Flow-matching noise. null: LeRobot samples fresh noise from the global RNG for
+# every action chunk, so the same scene can end differently on a rerun. An
+# integer N: every episode gets its own generator, seeded from N and the
+# episode's environment seed (noise_seed.py) and advanced once per model
+# forward; the metrics record both seeds, the forward count and a digest of
+# each noise block. On for the submission and for every model comparison.
+# ------------------------------------------------------------------
+smolvla_noise_seed: 0
+
+# Optional. If empty, the worker imports the lerobot installed in its Python
+# (policy/smolvla_multitask/setup_lerobot.sh installs it into .venv).
+lerobot_root: ""
+# Optional. If empty, SMOLVLA_PYTHON, which eval.sh points at .venv when it exists.
+smolvla_python: ""
+smolvla_cuda_visible_devices: 0
+smolvla_steps: 10
+# Which normalization each checkpoint was trained with is declared per task, in
+# its checkpoints.tasks entry above -- never here as one scalar and never
+# inferred from whether task_normalization.json happens to sit next to the
+# weights. All ten entries say legacy, which one scalar could also have said;
+# declaring it per entry is kept because it is strictly stronger. A scalar
+# states the mode once, so a checkpoint that turned up carrying statistics
+# would be run without them; a per-task declaration refuses that one task.
+# Setting the scalar alongside per-task modes is refused.
+#   legacy   -- Q1a and the official checkpoints: LeRobot's own normalizer only,
+#               and the gripper unit decided from the checkpoint's action.max.
+#               A checkpoint that carries task_normalization.json is refused:
+#               legacy would run it without its transform.
+#   required -- the checkpoint carries per-task statistics in
+#               task_normalization.json, which are applied to the state and
+#               undone on the action, and which also state the gripper units.
+#               A missing file, an unknown task, a digest that does not match
+#               the entry's content_sha256 -- any of these ends the run.
+smolvla_task_normalization: null
+# Refused in required mode (the statistics decide the units there), so a mixed
+# routing cannot state them. Left unset, the legacy tasks take the same values
+# test_configs/official_baseline.yml spells out: [6, 13] and [0.0, 1.0], auto.
+smolvla_rescale_gripper: null
+smolvla_gripper_indices: null
+smolvla_gripper_source_range: null
+smolvla_check_success_each_step: false
+# If set to N, every call predicts a fresh chunk from the current observation
+# and executes only its first N actions (N <= chunk_size). null keeps the
+# LeRobot action queue, which replans every n_action_steps (50 for the
+# released checkpoints) regardless of smolvla_steps.
+smolvla_replan_steps: null
+
+# pi0 backend (tasks with backend: pi0): fixed per-call noise, as in the drawer test
+pi0_noise_base: 0
