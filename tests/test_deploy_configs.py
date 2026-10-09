@@ -57,6 +57,16 @@ COMPETITION_TASKS = [
     "water_pouring",
 ]
 
+# The five tasks the submission routes to this project's own pi0 checkpoints, with the openpi config each must be
+# loaded with (mapping of 2026-10-09). The other five stay on the organisers' SmolVLA releases.
+PI0_TASKS = {
+    "drawer_open_place": "pi0_drawer_lora_b1_tomato",
+    "items_handover": "pi0_items_handover_lora_b2",
+    "mixer_operating": "pi0_mixer_operating_lora_b2",
+    "water_pouring": "pi0_water_pouring_lora_b2",
+    "manipulate_pipette": "pi0_pipette_lora_b2",
+}
+
 
 def modes_of(config: dict) -> dict:
     """{task: mode} exactly as the adapter would resolve it, for every task.
@@ -233,17 +243,29 @@ class DeployConfigs(unittest.TestCase):
         self.assertIn("required", modes, "a task-conditioned checkpoint needs a required config")
 
     def test_the_submission_config_is_the_final_mapping(self):
-        # All ten on the official legacy checkpoints, settled by holdout on
-        # 2026-09-26. The scalar stays unset even though every entry now says
-        # the same thing: a scalar states the mode once, and a checkpoint that
-        # turned up carrying statistics would be run without them, while a
-        # per-task declaration refuses that one task.
+        # Five tasks on this project's pi0 checkpoints, five on the official
+        # legacy ones (the mapping of 2026-10-09). The previous version of this
+        # test asserted all ten were legacy, which is how it caught the change.
+        #
+        # The scalar stays unset: it states one mode for every task, so a
+        # checkpoint that turned up carrying statistics would be run without
+        # them, while a per-task declaration refuses that one task. It also
+        # cannot describe a routing where five entries are not SmolVLA at all.
         config = yaml.safe_load((CONFIG_DIR / "deploy_policy.yml").read_text())
         self.assertIsNone(config["smolvla_task_normalization"])
         resolved = modes_of(config)
         self.assertEqual(set(resolved), set(COMPETITION_TASKS))
         for task in COMPETITION_TASKS:
-            self.assertEqual(resolved[task], "legacy", task)
+            self.assertEqual(resolved[task], "pi0" if task in PI0_TASKS else "legacy", task)
+        self.assertEqual(sorted(t for t, m in resolved.items() if m == "pi0"), sorted(PI0_TASKS))
+        # a pi0 entry carries no SmolVLA mode and no statistics digest, and names its openpi config
+        for task, want_config in sorted(PI0_TASKS.items()):
+            source = checkpoints.resolve_source({**config, "task_name": task})
+            self.assertEqual(source.backend, "pi0", task)
+            self.assertEqual(source.pi0_config, want_config, task)
+            self.assertIsNone(source.mode, task)
+            self.assertIsNone(source.content_sha256, task)
+            self.assertIsNone(source.local_dir, task)
         # and nothing outside the ten is routed, mode or not
         for task in set(TASKS) - set(COMPETITION_TASKS):
             with self.assertRaises(checkpoints.CheckpointError):

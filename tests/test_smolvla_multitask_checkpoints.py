@@ -33,10 +33,22 @@ except ImportError:  # pragma: no cover
 TASKS = {"click_bell", "handle_basket", "sample_loading"}
 REV_A = "a" * 40
 REV_B = "b" * 40
-OFFICIAL_TASKS = {
+ALL_TASKS = {
     "table_rearrangement", "click_bell", "water_pouring", "handle_basket", "items_handover",
     "drawer_open_place", "mixer_operating", "item_assembly", "manipulate_pipette", "sample_loading",
 }
+# The five tasks the submission routes to this project's own published pi0 checkpoints, with the openpi config each
+# must be loaded with (mapping of 2026-10-09). The revisions are not pinned here: they are read from the config and
+# only checked for being full 40-character pins, because the research repository's upload records are what fix them.
+PI0_TASKS = {
+    "drawer_open_place": ("kolmann1231/pi0-robosyn-drawer-16k", "pi0_drawer_lora_b1_tomato"),
+    "items_handover": ("kolmann1231/pi0-robosyn-handover-24k", "pi0_items_handover_lora_b2"),
+    "mixer_operating": ("kolmann1231/pi0-robosyn-mixer-16k", "pi0_mixer_operating_lora_b2"),
+    "water_pouring": ("kolmann1231/pi0-robosyn-water-16k", "pi0_water_pouring_lora_b2"),
+    "manipulate_pipette": ("kolmann1231/pi0-robosyn-pipette-24k", "pi0_pipette_lora_b2"),
+}
+# The tasks still evaluated with the organisers' releases.
+OFFICIAL_TASKS = ALL_TASKS - set(PI0_TASKS)
 
 
 def entry(repo="team/multitask", revision=REV_A):
@@ -113,7 +125,7 @@ class EntryValidation(unittest.TestCase):
             resolve(checkpoints={"defaults": entry()})
 
     def test_known_tasks_come_from_the_repository_configs(self):
-        self.assertLessEqual(OFFICIAL_TASKS, checkpoints.known_tasks())
+        self.assertLessEqual(ALL_TASKS, checkpoints.known_tasks())
 
 
 class PerTaskMode(unittest.TestCase):
@@ -337,35 +349,56 @@ class ShippedConfigs(unittest.TestCase):
         return yaml.safe_load((POLICY_DIR / relative).read_text())
 
     def test_submission_config_matches_the_final_mapping(self):
-        # The mapping was settled by holdout on 2026-09-26
-        # (experiments/holdout_DECISION.txt in the research repository): all ten
-        # tasks on the official single-task checkpoints. items_handover was the
-        # one task this project had chosen its own model for, on a 30-scene
-        # development result that a hundred untouched scenes did not reproduce.
+        # The mapping of 2026-10-09: five tasks on this project's own pi0
+        # checkpoints, five on the organisers' single-task SmolVLA releases.
+        # Until then all ten were official (holdout of 2026-09-26,
+        # experiments/holdout_DECISION.txt in the research repository), and the
+        # previous version of this test asserted exactly that, which is how it
+        # caught the change rather than letting it through.
         #
-        # Naming the official checkpoints is therefore deliberate -- but only
-        # task by task. What must never happen is one arriving through a default
-        # or a fallback, which would score the official model under this
-        # submission's name on a task nobody chose it for.
+        # Naming each checkpoint is deliberate -- but only task by task. What
+        # must never happen is one arriving through a default or a fallback,
+        # which would score some other model under this submission's name on a
+        # task nobody chose it for.
         config = self.load("deploy_policy.yml")
         self.assertEqual(config["policy_name"], "smolvla_multitask")
         self.assertEqual(config["checkpoint_dir"], "")
         self.assertIsNone(config["checkpoints"]["default"])
-        self.assertEqual(set(config["checkpoints"]["tasks"]), OFFICIAL_TASKS)
+        self.assertEqual(set(config["checkpoints"]["tasks"]), OFFICIAL_TASKS | set(PI0_TASKS))
+        self.assertEqual(set(config["checkpoints"]["tasks"]), ALL_TASKS)
         for task in sorted(OFFICIAL_TASKS):
             source = checkpoints.resolve_source({**config, "task_name": task})
             self.assertEqual(source.origin, f"checkpoints.tasks.{task}")
             self.assertEqual(source.repo_id, f"RoboSynChallenge/SmolVLA_sim_{task}")
             self.assertEqual(source.mode, "legacy")
+            self.assertEqual(source.backend, "smolvla")
             self.assertIsNone(source.content_sha256)
+        for task, (repo, pi0_config) in sorted(PI0_TASKS.items()):
+            source = checkpoints.resolve_source({**config, "task_name": task})
+            self.assertEqual(source.origin, f"checkpoints.tasks.{task}")
+            self.assertEqual(source.repo_id, repo, task)
+            self.assertEqual(source.backend, "pi0", task)
+            self.assertEqual(source.pi0_config, pi0_config, task)
+            self.assertIsNone(source.mode, task)             # SmolVLA's normalization does not apply
+            self.assertIsNone(source.content_sha256, task)
 
     def test_the_submission_pins_the_revisions_it_was_evaluated_at(self):
-        # The holdout numbers belong to these exact revisions; a branch name or a
-        # moved pin would make them describe something else.
+        # The official entries' numbers belong to these exact revisions; a branch
+        # name or a moved pin would make them describe something else. This now
+        # covers the five official entries only: the pi0 entries point at this
+        # project's own published repositories, which the baseline config knows
+        # nothing about. They are checked for being full pins instead, and for
+        # not being any of the official revisions.
         submission = self.load("deploy_policy.yml")["checkpoints"]["tasks"]
         baseline = self.load("test_configs/official_baseline.yml")["checkpoints"]["tasks"]
-        self.assertEqual({t: e["revision"] for t, e in submission.items()},
-                         {t: e["revision"] for t, e in baseline.items()})
+        self.assertEqual({t: e["revision"] for t, e in submission.items() if t in OFFICIAL_TASKS},
+                         {t: e["revision"] for t, e in baseline.items() if t in OFFICIAL_TASKS})
+        official_revisions = {e["revision"] for e in baseline.values()}
+        for task in sorted(PI0_TASKS):
+            revision = submission[task]["revision"]
+            self.assertRegex(revision, r"^[0-9a-f]{40}$", task)
+            self.assertNotIn(revision, official_revisions, task)
+            self.assertEqual(submission[task]["repo_id"], PI0_TASKS[task][0], task)
 
     def test_submission_config_declares_no_global_mode_and_no_gripper_overrides(self):
         # One scalar cannot describe a routing where nine tasks are legacy and
@@ -400,10 +433,12 @@ class ShippedConfigs(unittest.TestCase):
         self.assertEqual(pins[0].repo_id, "HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
 
     def test_official_baseline_config_covers_every_task_at_a_full_revision(self):
+        # The baseline is the all-official comparison config: ALL ten tasks, not
+        # only the five the submission still leaves official.
         config = self.load("test_configs/official_baseline.yml")
         self.assertIsNone(config["checkpoints"]["default"])
-        self.assertEqual(set(config["checkpoints"]["tasks"]), OFFICIAL_TASKS)
-        for task in OFFICIAL_TASKS:
+        self.assertEqual(set(config["checkpoints"]["tasks"]), ALL_TASKS)
+        for task in ALL_TASKS:
             source = checkpoints.resolve_source({**config, "task_name": task})
             self.assertEqual(source.repo_id, f"RoboSynChallenge/SmolVLA_sim_{task}")
 
@@ -422,7 +457,7 @@ class ShippedConfigs(unittest.TestCase):
                 config.pop(key)
         self.assertEqual(submission, baseline)
         # and the values the submission leaves unset are the ones the adapter
-        # falls back to, so the nine legacy tasks behave exactly as the baseline.
+        # falls back to, so the five legacy tasks behave exactly as the baseline.
         baseline_again = self.load("test_configs/official_baseline.yml")
         self.assertEqual(baseline_again["smolvla_task_normalization"], "legacy")
         self.assertEqual(baseline_again["smolvla_rescale_gripper"], "auto")
