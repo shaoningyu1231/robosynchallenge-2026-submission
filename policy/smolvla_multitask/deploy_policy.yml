@@ -44,20 +44,29 @@ checkpoints:
   # run instead of being covered by a model chosen for other tasks.
   default: null
   tasks:
-    # The final mapping (experiments/holdout_DECISION.txt in the research
-    # repository): all ten tasks on the official single-task checkpoints, each
-    # pinned to the revision it was evaluated at.
+    # The final mapping (user 10/9): five tasks on this project's pi0 checkpoints
+    # at the revisions they were published at, five on the official single-task
+    # checkpoints at the revisions they were evaluated at. Each pi0 entry's own
+    # comment states the evidence behind it; they are not all alike.
     #
-    # items_handover was the one task this project had chosen its own model for,
-    # on development evidence -- Q2-A led 12/30 against official's 5/30. On a
-    # hundred holdout scenes nothing had touched it was 21 against 26, and on
-    # the audit hundred 21 against 22, so the swap fails the admission rule and
-    # the task comes back here. Neither half is significant: that says there is
-    # no evidence for the change, not that Q2-A is worse.
+    # This block replaces the insurance config's note, which said all ten tasks
+    # were official and that items_handover "comes back here". Both are now
+    # false. That note described the holdout decision (Q2-A led 12/30 against
+    # official's 5/30 on development scenes, then 21 against 26 and 21 against
+    # 22 on two untouched hundreds, so the swap failed the admission rule). That
+    # decision concerned a different model and is superseded, not refuted, by the
+    # pi0 work; the insurance config at f10ba96 keeps the original wording.
+    #
+    # items_handover now carries pi0 24k, a DEVELOPMENT-POOL SELECTION adopted on
+    # the user's decision of 10/9. The pi0 16k for this task passed an independent
+    # test (B6, +30.7 points); the 24k shipped here did not, and B6's result is
+    # not its result.
     items_handover:
-      repo_id: RoboSynChallenge/SmolVLA_sim_items_handover
-      revision: fabe9462853965228e90e34bd517aa4e43bad323
-      mode: legacy
+      # pi0 24k (research repository, experiments/B8_RESULT_24k.txt: DEVELOPMENT-POOL SELECTION, not independently validated), anonymous download
+      repo_id: kolmann1231/pi0-robosyn-handover-24k
+      revision: 219b8ccb6a9a3f1f64beba698c0e41637d50517e
+      backend: pi0
+      pi0_config: pi0_items_handover_lora_b2
     table_rearrangement:
       repo_id: RoboSynChallenge/SmolVLA_sim_table_rearrangement
       revision: 913b29a7136876108a330aead1855309f985cbd8
@@ -67,29 +76,37 @@ checkpoints:
       revision: 27965b7e2432f5a3084f2c60a04bff7c5a47b853
       mode: legacy
     water_pouring:
-      repo_id: RoboSynChallenge/SmolVLA_sim_water_pouring
-      revision: 2bf5d9c2d8d0b5820ba5c9fe6284c5ff8647561f
-      mode: legacy
+      # pi0 16k (research repository, experiments/B9_RESULT_water_pouring.txt: independent test passed), anonymous download
+      repo_id: kolmann1231/pi0-robosyn-water-16k
+      revision: 3b6487599499eecb29acf25c3e54b5f73193b96e
+      backend: pi0
+      pi0_config: pi0_water_pouring_lora_b2
     handle_basket:
       repo_id: RoboSynChallenge/SmolVLA_sim_handle_basket
       revision: 0de9a93f124bd4ebe2fbd0d572ce3133806b82a9
       mode: legacy
     drawer_open_place:
-      repo_id: RoboSynChallenge/SmolVLA_sim_drawer_open_place
-      revision: c0088d84a568f93fb4401aabafcc41cf643efcdd
-      mode: legacy
+      # pi0 16k (research repository, experiments/B3_DRAWER_TEST_RESULT.txt: independent test passed), anonymous download
+      repo_id: kolmann1231/pi0-robosyn-drawer-16k
+      revision: 2c1edf66fe0b2d4d3bec9caa9c7a9d9a7284117b
+      backend: pi0
+      pi0_config: pi0_drawer_lora_b1_tomato
     mixer_operating:
-      repo_id: RoboSynChallenge/SmolVLA_sim_mixer_operating
-      revision: 42311ef3e795079caefee7a28f05c967caa870ac
-      mode: legacy
+      # pi0 16k (research repository, experiments/B7_RESULT_mixer_operating.txt: independent test passed), anonymous download
+      repo_id: kolmann1231/pi0-robosyn-mixer-16k
+      revision: 940fc3b587a739e27c9b16dca57de35ce00cf04b
+      backend: pi0
+      pi0_config: pi0_mixer_operating_lora_b2
     item_assembly:
       repo_id: RoboSynChallenge/SmolVLA_sim_item_assembly
       revision: db32020164ed2c7264804a5eb036a38a07d879ca
       mode: legacy
     manipulate_pipette:
-      repo_id: RoboSynChallenge/SmolVLA_sim_manipulate_pipette
-      revision: dd0e80bc7d5fa5081e1fa07f1b7115bad6dbffa0
-      mode: legacy
+      # pi0 24k (research repository, experiments/B8_RESULT_24k.txt: DEVELOPMENT-POOL SELECTION, not independently validated), anonymous download
+      repo_id: kolmann1231/pi0-robosyn-pipette-24k
+      revision: 7a56dc1b5ea33f5acf13cc6c7f8fc8bdff56a292
+      backend: pi0
+      pi0_config: pi0_pipette_lora_b2
     sample_loading:
       repo_id: RoboSynChallenge/SmolVLA_sim_sample_loading
       revision: 2a4f41ab3be8e5f544c890d6054bc8de3be5c53b
