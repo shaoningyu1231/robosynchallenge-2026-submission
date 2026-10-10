@@ -41,6 +41,39 @@ If that environment cannot be built on the evaluating machine, the five pi0 task
 cannot run; that is the largest single risk in this submission, and it is stated
 here rather than discovered at evaluation time.
 
+### What `setup_pi0.sh` assumes about the machine
+
+Building the pi05 environment from a fresh clone on our own evaluation box turned
+up four prerequisites. All four come from `policy/pi05/` as upstream ships it, not
+from anything this submission changed, and `setup_pi0.sh` and `policy/pi05/uv.lock`
+are byte-identical to upstream's. They are listed with the error each one produces
+so they can be recognised rather than diagnosed.
+
+1. **A CPython 3.11.** `policy/pi05/pyproject.toml` requires `>=3.11,<3.12`. If the
+   system Python is not 3.11, uv downloads a managed interpreter, which needs
+   access to the python-build-standalone release assets on GitHub. An existing
+   3.11 can be supplied instead with `UV_PYTHON=/path/to/python3.11`.
+2. **An EmbodiChain checkout beside this repository.** `policy/pi05/uv.lock` and
+   `pyproject.toml` pin `embodichain` as an editable path dependency at
+   `../../../EmbodiChain`, which is the layout the official installation document
+   prescribes: `RoboSynChallenge_ws/{EmbodiChain,RoboSynChallenge}`. Without the
+   sibling, `uv sync --frozen` stops with
+   `Distribution not found at: file:///<parent>/EmbodiChain`. The `EMBODICHAIN_ROOT`
+   variable does not help here: it only selects the simulator's Python, while the
+   path in the lock is resolved by uv.
+3. **Reachable `github.com`.** The lock pins two dependencies to commits —
+   `lerobot@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5` and
+   `dlimp@ad72ce3a9b414db2185bc0b38461d4101a65477a`, both upstream openpi's. Without
+   access, `uv sync` stops at `unable to access 'https://github.com/huggingface/lerobot/'`.
+   Either commit may also be served from a local mirror through git's `insteadOf`;
+   the 40-character commit is what pins the content either way.
+4. **Patience on a slow link.** `uv sync --frozen` fetches every wheel from the URL
+   written in the lock (`files.pythonhosted.org`), not from a configured index
+   mirror, and runs them concurrently. On a thin connection a single large wheel can
+   exceed uv's 30 s default and the build stops with
+   `Failed to download distribution due to network timeout. Try increasing UV_HTTP_TIMEOUT`.
+   Raising `UV_HTTP_TIMEOUT` is enough; nothing in the submission needs to change.
+
 ## Checkpoints
 
 From `checkpoints.tasks` and `vlm` in

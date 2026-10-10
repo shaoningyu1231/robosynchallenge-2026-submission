@@ -168,3 +168,6 @@ smolvla_check_success_each_step: false
 # LeRobot action queue, which replans every n_action_steps (50 for the
 # released checkpoints) regardless of smolvla_steps.
 smolvla_replan_steps: null
+
+# pi0 backend (tasks with backend: pi0): fixed per-call noise, the value every pi0 test used
+pi0_noise_base: 0

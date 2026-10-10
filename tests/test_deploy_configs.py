@@ -48,6 +48,34 @@ checkpoints = importlib.util.module_from_spec(_ck_spec)
 sys.modules[_ck_spec.name] = checkpoints          # dataclasses resolves through sys.modules
 _ck_spec.loader.exec_module(checkpoints)
 
+# The pi0 backend holds the rule this file has to check (pi0_noise_base is mandatory and has no default), so it is
+# loaded rather than copied. The package's own __init__ imports deploy_policy, which needs torch, so the two package
+# entries are stubbed for the import and sys.modules is put back exactly as it was afterwards.
+def _load_pi0_backend():
+    import types
+    saved = {k: sys.modules.get(k) for k in ("policy", "policy.smolvla_multitask")}
+    try:
+        pkg = types.ModuleType("policy")
+        pkg.__path__ = [str(ROOT / "policy")]
+        sys.modules["policy"] = pkg
+        sub = types.ModuleType("policy.smolvla_multitask")
+        sub.__path__ = [str(CONFIG_DIR)]
+        sys.modules["policy.smolvla_multitask"] = sub
+        return importlib.import_module("policy.smolvla_multitask.pi0_backend")
+    except Exception:                       # numpy missing, or the backend cannot be loaded here
+        return None
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
+import importlib  # noqa: E402
+
+pi0_backend = _load_pi0_backend()
+
 TASKS = sorted(checkpoints.known_tasks())
 # The ten the competition scores. known_tasks() also yields "other_tasks", the
 # name of the directory holding the extra scenes -- not a task, and not routed.
@@ -270,6 +298,33 @@ class DeployConfigs(unittest.TestCase):
         for task in set(TASKS) - set(COMPETITION_TASKS):
             with self.assertRaises(checkpoints.CheckpointError):
                 checkpoints.resolve_source({**config, "task_name": task})
+
+    @unittest.skipIf(pi0_backend is None, "the pi0 backend cannot be imported here")
+    def test_every_config_that_routes_to_pi0_supplies_what_the_backend_requires(self):
+        """Acceptance attempt 7 (10/10): deploy_policy.yml routed five tasks to pi0 with no pi0_noise_base.
+
+        pi0_backend.get_model reads it with no default, so the config loaded, the environment built, the published
+        checkpoint downloaded, and the first pi0 task then died with "pi0_noise_base must be a non-negative integer,
+        got None". This suite passed at the time: it checked identity, never whether the chosen backend's required
+        settings were present. The rule is taken from the backend itself, not restated here.
+        """
+        checked = 0
+        for path in shipped_configs():
+            config = yaml.safe_load(path.read_text())
+            if "pi0" not in set(modes_of(config).values()):
+                continue
+            checked += 1
+            value = config.get("pi0_noise_base")
+            self.assertEqual(pi0_backend._noise_base(value), value, path.name)
+        self.assertGreaterEqual(checked, 1, "no shipped config routes to pi0 -- this guard would test nothing")
+
+    @unittest.skipIf(pi0_backend is None, "the pi0 backend cannot be imported here")
+    def test_a_config_that_omits_the_setting_is_caught(self):
+        """The counter-example: exactly what a967d80 shipped."""
+        config = yaml.safe_load((CONFIG_DIR / "deploy_policy.yml").read_text())
+        config.pop("pi0_noise_base", None)
+        with self.assertRaises(pi0_backend.Pi0Error):
+            pi0_backend._noise_base(config.get("pi0_noise_base"))
 
     def test_an_unrouted_task_is_not_silently_given_a_mode(self):
         config = yaml.safe_load((CONFIG_DIR / "deploy_policy.yml").read_text())
