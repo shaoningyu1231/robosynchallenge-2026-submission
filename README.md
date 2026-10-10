@@ -12,11 +12,33 @@
 # Contents
 
 - [Contents](#contents)
+- [This submission](#this-submission)
 - [Installtion](#installtion)
 - [Datasets](#datasets)
 - [Training and Evaluation](#training-and-evaluation)
 - [Released Checkpoint Results](#released-checkpoint-results)
 - [LeaderBoard](#leaderboard)
+
+# This submission
+
+This repository is a RoboSynChallenge 2026 submission. What is submitted, which
+checkpoint each of the ten tasks uses, what was verified and what was not are all
+described in **[`SUBMISSION.md`](SUBMISSION.md)** — read that first.
+
+Evaluation uses the unchanged official command, one task at a time:
+
+```bash
+bash policy/smolvla_multitask/eval.sh <task_name> random <gpu_id>
+```
+
+Five tasks route to a pi0 backend behind that same command. Their environment is
+built once by `bash policy/smolvla_multitask/setup_pi0.sh`, which needs a CPython
+3.11 interpreter, EmbodiChain placed as a sibling directory of this repository,
+and access to `github.com`; see "Install prerequisites" in `SUBMISSION.md`.
+
+The engineering acceptance of this submission passed 9 of the 10 tasks and is
+FAILED as a whole: `item_assembly` writes correct metrics but its process exits
+139 in the simulator's teardown. `SUBMISSION.md` states this in full.
 
 # Installtion
 Based on the [**EmbodiChain**](https://dexforce.github.io/EmbodiChain/main/quick_start/install.html), we offer both `docker` and `local` installation methods. For detailed installation instructions, please refer to [**Installation Document**](https://edem-ai.github.io/RoboSynChallenge/html/getting_started/installation.html).

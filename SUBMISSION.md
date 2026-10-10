@@ -225,22 +225,88 @@ are committed here; nothing needs to be patched at evaluation time.
 
 ## Verified
 
-**The engineering acceptance of THIS submission has not been run yet.** Nothing
-in this section may be read as a result for the five-pi0 configuration until it
-is replaced by the acceptance's own record.
+**Per-task engineering acceptance: 9 of 10 tasks passed. The acceptance as a whole
+is FAILED.** This submission is a competition selection made in acceptance of a
+known risk, not a ten-task acceptance certificate.
 
-What has been accepted is the all-official submission: final acceptance
-2026-09-26 on commit `f10ba96861af89f1dfc24eb1afdae51bf6ca4e2c`
+Run on this commit, in one directory (`final_accept_1010j`), 2026-10-10. The
+machine check's own words:
+
+```
+covered 9/10 tasks
+PROBLEM item_assembly: no passing record
+RECORDS=FAILED
+```
+
+Nine tasks each have one invocation that exited 0, whose metrics matched every
+identity rule (repository, 40-character revision, pi0 config, frozen normalizer
+sha256, episode count) and which left no process behind and returned the GPU to
+its idle reading: `table_rearrangement`, `click_bell`, `water_pouring`,
+`handle_basket`, `items_handover`, `drawer_open_place`, `mixer_operating`,
+`manipulate_pipette`, `sample_loading`. All five pi0 entries are among them.
+
+**`item_assembly` has no passing record.** Four attempts, four exits with code
+139: the process segfaults inside the simulator's teardown, after the episode
+finished and after `evaluation_metrics.json` was written. The last attempt's
+metrics are themselves correct (`SmolVLA_sim_item_assembly` at
+`db32020164ed2c7264804a5eb036a38a07d879ca`, VLM at
+`7b375e1b73b11138ff12fe22c8f2822d8fe03467`, one episode, 1/1 success); the
+failure is the exit code, in teardown. **If the organisers judge a task by its
+exit code, this task may be scored as a failure.** The task is still on the
+official SmolVLA checkpoint and is unchanged by this submission; the same crash
+is on record for the official checkpoint itself, on this project's run stack.
+The task was not removed, the failure records were not edited, and no further
+attempts were made.
+
+Note that this run stack sets `EMBODICHAIN_SIM_EXIT_PROCESS=0` and drains the
+deferred teardown by hand, deliberately: the upstream default (`=1`) calls
+`os._exit(0)`, which would report success for a crashed run. Restoring real exit
+codes is what makes a teardown segfault visible as exit 139. The root cause is
+not established.
+
+What this acceptance is, and is not:
+
+- **It is not one continuous pass from an empty cache.** The nine passes were
+  completed as per-task invocations inside one acceptance directory.
+- **Four of the nine records were reconstructed after the fact**, read-only, from
+  the original logs and the files still on disk (`table_rearrangement`,
+  `click_bell`, `water_pouring`, `handle_basket`). They are labelled
+  `reconstructed` in the records and name their evidence.
+- **For those same four tasks the download was not exercised in this round**; their
+  weights were reused from this directory. The other five were downloaded during
+  the run.
+- **Downloads went through the mirror `https://hf-mirror.com`, and the Python 3.11
+  interpreter was pre-installed.** This is therefore a pre-installed-interpreter,
+  mirror-download, run acceptance — **not an official-source end-to-end pass**. An
+  anonymous read-back from the official source was done separately, on a different
+  machine; the two are not the same test and are not combined here.
+
+At the end of the run every repository in the cache was re-hashed
+(`CACHED_WEIGHTS=OK`). The five pi0 repositories published for this submission
+were checked file by file against their upload records (18, 23, 19, 21 and 21
+uploaded files respectively, each plus one hub-generated file). The six official
+repositories, including the VLM backbone, were checked **by revision only**,
+because they were not uploaded by us and no hash table exists for them.
+
+The earlier all-official submission remains accepted on its own terms: final
+acceptance 2026-09-26 on commit `f10ba96861af89f1dfc24eb1afdae51bf6ca4e2c`
 (`deploy_policy.yml` sha256
-`32c052abcc21a4121bbee41a57beaac224e1048897dd210fd271b3531f2abee9`), which
-remains available as the tags `submission-safe-f10ba96` and
-`submission-final-3a73cd5`. That acceptance covers the SmolVLA route and the five
-entries that are still official; **it does not cover the pi0 route**, which it
-never ran.
+`32c052abcc21a4121bbee41a57beaac224e1048897dd210fd271b3531f2abee9`), preserved as
+the tags `submission-safe-f10ba96` and `submission-final-3a73cd5`. That acceptance
+covers the SmolVLA route only; **it does not cover the pi0 route**, which it never
+ran.
 
-The pi0 route has so far been accepted only from local checkpoint directories
-(drawer, items_handover, mixer_operating, water_pouring). Downloading a pi0
-checkpoint from Hugging Face by pinned revision into an empty cache with no
-credential has **not** yet been accepted end to end, and `manipulate_pipette` has
-not been through a delivery acceptance at all. That is exactly what the pending
-acceptance has to prove, for all ten tasks, from a fresh clone.
+## Install prerequisites
+
+The acceptance established three conditions the installer must satisfy. They
+follow from the official workspace layout and from `uv.lock`; neither
+`setup_pi0.sh` nor `uv.lock` was modified for them.
+
+1. **A CPython 3.11 interpreter must be obtainable.** The pi05 environment
+   requires `>=3.11,<3.12`.
+2. **EmbodiChain must sit as a sibling directory of this repository**, as the
+   official workspace layout specifies: the lock pins it at `../../../EmbodiChain`.
+3. **`github.com` must be reachable.** The lock carries two GitHub commit
+   dependencies from upstream openpi (`lerobot@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5`
+   and `dlimp@ad72ce3a9b414db2185bc0b38461d4101a65477a`). `dlimp` is in the
+   optional `rlds` group and is not installed by a default `uv sync`.
