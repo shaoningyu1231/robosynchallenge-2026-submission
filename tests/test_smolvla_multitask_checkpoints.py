@@ -449,6 +449,12 @@ class ShippedConfigs(unittest.TestCase):
         # the scalar, the submission declares a mode per entry instead.
         submission = self.load("deploy_policy.yml")
         baseline = self.load("test_configs/official_baseline.yml")
+        # One key the submission adds and the baseline cannot have: the pi0 backend requires pi0_noise_base and has
+        # no default, while an all-official config never reaches that backend. It is asserted here rather than listed
+        # as "may differ", so it cannot be quietly dropped -- a967d80 shipped without it and the first pi0 task died
+        # at model construction.
+        self.assertEqual(submission.pop("pi0_noise_base"), 0)
+        self.assertNotIn("pi0_noise_base", baseline)
         differ = ("checkpoints", "model_name", "smolvla_task_normalization",
                   "smolvla_rescale_gripper", "smolvla_gripper_indices",
                   "smolvla_gripper_source_range")
